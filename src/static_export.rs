@@ -110,6 +110,7 @@ pub(crate) struct FeedDocument {
 
 fn valid_name(name: &str) -> bool {
     !name.is_empty()
+        && name != "archive"
         && name.len() <= 80
         && name
             .bytes()
@@ -580,7 +581,7 @@ mod tests {
         ] {
             assert!(Site::new(url).is_err(), "{url}");
         }
-        for name in ["../escape", "Upper", "", "-bad", "a/b"] {
+        for name in ["../escape", "Upper", "", "-bad", "a/b", "archive"] {
             assert!(!valid_name(name));
         }
         assert_eq!(

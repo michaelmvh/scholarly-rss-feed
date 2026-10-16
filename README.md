@@ -80,6 +80,7 @@ The root reader uses `default_feed`, `/feed.xml` is its RSS subscription, and ea
 feed has `/feeds/<name>/` and `/feeds/<name>/feed.xml`. New article pages live under
 `/article/<stable-id>/`. Old `?rss` URLs are not supported on static hosting. Named feed
 keys must use lowercase letters, digits, or hyphens, beginning with a letter or digit.
+The name `archive` is reserved for the retained metadata file.
 Use a site URL with a path prefix for a project-site preview.
 
 `data/archive.json` is public, retained rendering metadata, not a private provider cache.

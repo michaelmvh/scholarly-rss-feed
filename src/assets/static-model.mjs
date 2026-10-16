@@ -35,7 +35,7 @@ export function matches(article, state, now = new Date()) {
   if (days) {
     const cutoff = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) - days * 86400000;
     const date = /^\d{4}-\d{2}-\d{2}$/.test(article.date) ? Date.parse(`${article.date}T00:00:00Z`) : NaN;
-    if (!(date >= cutoff)) return false;
+    if (!(date >= cutoff) || new Date(date).toISOString().slice(0, 10) !== article.date) return false;
   }
   const authorMatches = state.mode === "all" || (state.mode === "default"
     ? article.defaultAuthor

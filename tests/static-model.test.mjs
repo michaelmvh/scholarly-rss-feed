@@ -25,6 +25,7 @@ test("date cutoff is inclusive and excludes undated collection entries", () => {
   assert.equal(matches(article, state("authors=all&period=30d"), now), true);
   assert.equal(matches({ ...article, date: "2026-09-30" }, state("authors=all&period=30d"), now), false);
   assert.equal(matches({ ...article, date: "" }, state("authors=all&period=30d"), now), false);
+  assert.equal(matches({ ...article, date: "2026-02-30" }, state("authors=all&period=1y"), now), false);
 });
 
 test("filter URL round trips including empty custom selection", () => {
