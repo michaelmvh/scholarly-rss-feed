@@ -1,7 +1,9 @@
 mod filters;
 mod render;
+pub(crate) mod static_render;
 
 use crate::provenance::DiscoverySource;
+use serde::{Deserialize, Serialize};
 
 pub(crate) use filters::AUTHOR_PARAM;
 pub use render::{
@@ -24,7 +26,7 @@ pub struct PaperSourceOption {
     pub selected: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Publication {
     pub id: Option<String>,
     pub title: String,
@@ -39,7 +41,7 @@ pub struct Publication {
     pub curated_categories: Vec<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Author {
     pub name: String,
     pub filter_id: String,
@@ -47,7 +49,7 @@ pub struct Author {
     pub optional: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CollectionDate {
     pub date: String,
     pub commit_url: String,

@@ -59,6 +59,45 @@ subscription URLs without strict backward compatibility, and covers static filte
 publication safety, and rollback. This is a proposal; the deployment instructions below
 still describe the current NAS-hosted service.
 
+### Run-once static export
+
+The exporter is an opt-in alternative to HTTP serving. It generates every configured named
+feed, actual RSS XML, individual article pages, reader icons, public metadata, and a retained
+article archive. It never starts a listening socket.
+
+```sh
+cargo run --locked -- --export /tmp/reading-next \
+  --site-url https://reading.michaelmvh.com/ --config feeds.toml
+```
+
+The output directory must not already exist. On subsequent runs, retain published article
+identities and pages by passing `--previous /path/to/last-successful-output`. An explicitly
+supplied previous archive must exist and parse successfully; it is never silently discarded.
+Do not point the exporter directly at a live publishing checkout. Validate staging output
+before copying it into the publishing repository.
+
+The root reader uses `default_feed`, `/feed.xml` is its RSS subscription, and each named
+feed has `/feeds/<name>/` and `/feeds/<name>/feed.xml`. New article pages live under
+`/article/<stable-id>/`. Old `?rss` URLs are not supported on static hosting. Named feed
+keys must use lowercase letters, digits, or hyphens, beginning with a letter or digit.
+Use a site URL with a path prefix for a project-site preview.
+
+`data/archive.json` is public, retained rendering metadata, not a private provider cache.
+Keep the entire previous output backed up. Empty required feeds, unsafe publication URLs,
+ambiguous identities, and malformed previous archives stop publication. Source integrations
+may still reuse their existing caches: `status.json` reports snapshot generation time, not
+a guarantee that every upstream source was refreshed.
+
+For an offline synthetic preview, without provider requests:
+
+```sh
+GSRF_TEST_EXPORT_DIR=/tmp/reading-fixture \
+  cargo test --locked export_fixture -- --ignored
+```
+
+The destination must be fresh. These example papers are fixtures, not a production feed.
+The CI workflow runs Rust and reader tests and uploads this synthetic site as an artifact.
+
 ## Feed configuration
 
 Named feeds live in [`feeds.toml`](./feeds.toml), keeping the public URL stable when authors,

@@ -9,6 +9,7 @@ mod openalex_enrichment;
 mod provenance;
 mod reader;
 mod snapshot_store;
+mod static_export;
 mod works;
 
 use crate::config::{Config, FeedConfig};
@@ -173,6 +174,7 @@ struct CliArgs {
     address: String,
     config_path: PathBuf,
     comparison: Option<ComparisonArgs>,
+    export: Option<static_export::ExportArgs>,
 }
 
 struct ComparisonArgs {
@@ -272,6 +274,14 @@ async fn main() {
     };
     CONFIG_PATH.set(cli.config_path.clone()).ok();
 
+    if let Some(export) = cli.export {
+        if let Err(error) = static_export::run(&export, &cli.config_path).await {
+            eprintln!("Static export failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     if let Some(comparison) = cli.comparison {
         if let Err(error) = run_curated_comparison(&comparison, &cli.config_path).await {
             eprintln!("{error}");
@@ -336,10 +346,21 @@ fn parse_cli_args_from(args: impl IntoIterator<Item = String>) -> Result<CliArgs
     let mut address: Option<String> = None;
     let mut config: Option<String> = None;
     let mut comparison = None;
+    let mut export_dir = None;
+    let mut site_url = None;
+    let mut previous_dir = None;
 
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--export" | "--site-url" | "--previous" => {
+                let value = args.next().ok_or_else(|| format!("{arg} requires a value"))?;
+                match arg.as_str() {
+                    "--export" => export_dir = Some(PathBuf::from(value)),
+                    "--site-url" => site_url = Some(value),
+                    _ => previous_dir = Some(PathBuf::from(value)),
+                }
+            }
             "--config" => {
                 config = Some(
                     args.next()
@@ -371,6 +392,16 @@ fn parse_cli_args_from(args: impl IntoIterator<Item = String>) -> Result<CliArgs
         }
     }
 
+    if export_dir.is_none() && (site_url.is_some() || previous_dir.is_some()) {
+        return Err("--site-url and --previous require --export.".to_string());
+    }
+    if export_dir.is_some() && (comparison.is_some() || address.is_some()) {
+        return Err("--export cannot be combined with a server address or --compare-curated.".to_string());
+    }
+    let export = export_dir.map(|output| {
+        let site_url = site_url.ok_or_else(|| "--export requires --site-url.".to_string())?;
+        static_export::ExportArgs::new(output, &site_url, previous_dir)
+    }).transpose()?;
     let address = address.unwrap_or_else(|| "127.0.0.1:3005".to_string());
     let config = config
         .or_else(|| env::var("GSRF_CONFIG").ok())
@@ -380,6 +411,7 @@ fn parse_cli_args_from(args: impl IntoIterator<Item = String>) -> Result<CliArgs
         address,
         config_path: PathBuf::from(config),
         comparison,
+        export,
     })
 }
 
