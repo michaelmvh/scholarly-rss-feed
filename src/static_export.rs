@@ -384,6 +384,14 @@ fn export(
         crate::reader::READER_CSS.as_bytes().to_vec(),
     );
     files.insert(
+        "static-reader.mjs".to_string(),
+        include_bytes!("assets/static-reader.mjs").to_vec(),
+    );
+    files.insert(
+        "static-model.mjs".to_string(),
+        include_bytes!("assets/static-model.mjs").to_vec(),
+    );
+    files.insert(
         "favicon.svg".to_string(),
         crate::reader::FAVICON.as_bytes().to_vec(),
     );
@@ -468,7 +476,29 @@ mod tests {
         let site = std::env::var("GSRF_TEST_SITE_URL")
             .unwrap_or_else(|_| "http://127.0.0.1:8080/".to_string());
         let mut generated = sample("optional");
+        generated.reader.publications[0].discovery_sources =
+            vec![crate::provenance::DiscoverySource::curated_collection(
+                "example".to_string(),
+                "Example collection".to_string(),
+                "https://example.org/".to_string(),
+            )];
+        generated.reader.paper_sources = vec![
+            crate::reader::PaperSourceOption {
+                value: "core".to_string(),
+                label: "Core".to_string(),
+                group: "Sources",
+                selected: true,
+            },
+            crate::reader::PaperSourceOption {
+                value: "curated:example".to_string(),
+                label: "Example collection".to_string(),
+                group: "Sources",
+                selected: true,
+            },
+        ];
         let mut required = sample("required");
+        required.reader.publications[0].discovery_sources =
+            vec![crate::provenance::DiscoverySource::openalex()];
         required.reader.publications[0].authors[0].optional = false;
         required.reader.publications[0].authors[0].filter_id = "required".to_string();
         required.reader.publications[0].authors[0].name = "Required Author".to_string();
@@ -571,7 +601,10 @@ mod tests {
         let html = fs::read_to_string(output.join("index.html")).unwrap();
         assert!(html.contains("/preview/apple-touch-icon.png"));
         assert!(!html.contains("?rss"));
-        assert!(!html.contains("&lt;Research")); // optional-only paper hidden in the default reader
+        let parsed = scraper::Html::parse_document(&html);
+        assert!(parsed
+            .select(&scraper::Selector::parse("li[data-article]").unwrap())
+            .all(|article| article.value().attr("hidden").is_some()));
         let detail = fs::read_to_string(output.join(format!("article/{id}/index.html"))).unwrap();
         assert!(detail.contains("&lt;Research &amp; Science&gt;"));
         let channel =

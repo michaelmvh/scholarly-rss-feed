@@ -17,12 +17,17 @@ jobs:
         with:
           node-version: '24'
       - run: cargo test --locked
-      - run: node --test tests/reader.test.cjs
+      - run: npm ci
+      - run: npm test
       - name: Generate synthetic static preview
         run: cargo test --locked export_fixture -- --ignored
         env:
           GSRF_TEST_EXPORT_DIR: ${{ runner.temp }}/static-preview
           GSRF_TEST_SITE_URL: https://example.org/
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:browser
+        env:
+          GSRF_TEST_EXPORT_DIR: ${{ runner.temp }}/static-preview
       - uses: actions/upload-artifact@v4
         with:
           name: synthetic-static-preview

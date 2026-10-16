@@ -98,6 +98,26 @@ GSRF_TEST_EXPORT_DIR=/tmp/reading-fixture \
 The destination must be fresh. These example papers are fixtures, not a production feed.
 The CI workflow runs Rust and reader tests and uploads this synthetic site as an artifact.
 
+Static pages progressively enhance the pre-rendered listing with browser-only date, author,
+and source filters. Optional authors remain in RSS; default, all, and explicitly empty
+custom author selections remain distinct. URL state survives direct article navigation,
+reloads, and browser back/forward. Invalid filter URLs show an error and a clear-filters
+recovery action. RSS links always describe the complete named feed, not the filtered view.
+Only sources collected for that named feed are offered; add separate named feed presets
+in `feeds.toml` for other source combinations.
+
+Browser tests use Node.js 24 and Playwright:
+
+```sh
+npm ci
+npm test
+npx playwright install chromium
+GSRF_TEST_EXPORT_DIR=/tmp/reading-fixture npm run test:browser
+```
+
+Generate the fixture first using the preceding command. The browser runner owns and stops
+its local static server; it never needs the NAS or live provider APIs.
+
 ## Feed configuration
 
 Named feeds live in [`feeds.toml`](./feeds.toml), keeping the public URL stable when authors,
