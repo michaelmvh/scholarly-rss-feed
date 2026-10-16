@@ -50,6 +50,14 @@ The image and Compose file update independently:
 - **Deployment changes:** upload the changed `NAS/docker-compose.yml` to the NAS and recreate
   the Container Manager project. GHCR cannot update the Compose file itself.
 
+### Proposed static hosting
+
+The [static reading site migration plan](docs/static-reading-site-plan.md) describes moving
+public hosting to GitHub Pages while keeping scheduled generation on the NAS,
+`reading.michaelmvh.com`, the reader's icons, and RSS. It covers legacy subscription URLs,
+static filtering, publication safety, and rollback. This is a proposal; the deployment
+instructions below still describe the current NAS-hosted service.
+
 ## Feed configuration
 
 Named feeds live in [`feeds.toml`](./feeds.toml), keeping the public URL stable when authors,
