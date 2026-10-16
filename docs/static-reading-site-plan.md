@@ -28,14 +28,26 @@ application, templates, browser code, icons, feed configuration, and exporter te
 deployment workflow; it is not a second implementation of the reader. The portfolio
 repository does not need to change.
 
+### Migration assumption: no strict backward compatibility
+
+Treat this as a clean cutover to the static site's URL and data contracts. Existing RSS
+subscriptions and bookmarks may need updating; preserving every legacy URL, query parameter,
+or item identifier is not an acceptance requirement. Use GitHub Pages directly, with no
+Cloudflare redirect layer, browser compatibility shim, or historical article-alias backfill.
+Cloudflare can remain the DNS provider.
+
+Preserve the reader's useful behavior and visual identity, not the old server's routing
+contract. Keep newly published article URLs and RSS identities stable across routine static
+updates; relaxing migration compatibility is not a reason to churn them on every export.
+
 ## Requirements to preserve
 
 | Requirement | Planned behavior | Main challenge |
 | --- | --- | --- |
 | Separate subdomain | Continue using `reading.michaelmvh.com` over HTTPS | DNS, Pages domain registration, certificate provisioning, and rollback must be coordinated |
 | Unique icons | Keep the existing SVG favicon and 180x180 PNG Apple touch icon | Safari and Home Screen bookmarks may retain cached icons |
-| RSS | Publish real XML files with stable item identities and absolute links | Existing `?rss` URLs cannot select XML on Pages alone |
-| Individual article pages | Pre-render one readable HTML page per article, with stable paths | Preserve aliases when enrichment or deduplication changes a record's preferred ID |
+| RSS | Publish real XML files with stable item identities and absolute links | Update subscriptions from `?rss` URLs to the new XML paths |
+| Individual article pages | Pre-render one readable HTML page per article, with stable paths | Keep static-site identities stable as metadata is enriched; old NAS URLs need not resolve |
 | Reader filters | Filter exported records without contacting the NAS | Current controls submit to a server; browser filtering needs implementation |
 | Optional sources | Collect supported categories in scheduled jobs, but leave them unselected by default | Selecting a source can no longer initiate discovery on demand |
 | Optional authors | Preserve default, custom, empty, and all-author selection semantics | Reader defaults must not silently remove optional authors from RSS |
@@ -84,15 +96,14 @@ Proposed paths, all under `https://reading.michaelmvh.com`:
 | `/404.html` | Clear missing-page response with navigation to the reader |
 
 Write directory indexes for reader and article paths so direct navigation and browser
-refresh work without an SPA fallback. Preserve the current hex-encoded article identifiers
-where possible and test Pages' redirect from old slashless article paths to directory URLs.
-Support a configurable base path for a pre-cutover project-site preview; production stays
-at the subdomain root.
+refresh work without an SPA fallback. Choose a simple static-site identifier format without
+requiring the current hex encoding or old slashless paths. Support a configurable base path
+for a pre-cutover project-site preview; production stays at the subdomain root.
 
-Keep identifiers independent of titles, rendering order, and generation timestamps. Maintain
-a durable article/alias registry so a preprint later merged with a published work retains its
-previously published URLs. Bootstrap aliases from known current records; do not promise
-recovery of every historical URL if no record of that identifier remains.
+Keep identifiers independent of titles, rendering order, and generation timestamps. Persist
+the identities assigned to published static records so enrichment does not change their URLs
+or RSS GUIDs on each run. Reuse existing identifiers where convenient, but do not reconstruct
+old NAS links or build a migration alias registry.
 
 Feed retention and article-page retention are different: papers can leave the rolling feed
 without deleting their published article pages. Persist the article registry and retained
@@ -114,14 +125,16 @@ dates, tracked-author identity, optional status, and discovery provenance.
 Preserve the current author rules: default selection hides optional-only tracked-author
 papers, all-author mode includes untracked papers, and an explicitly empty custom selection
 shows no papers. Preserve selection state in URLs, including navigation to and from articles.
+Use a clean static-reader query format rather than reproducing legacy server form fields.
 Do not introduce browser-local preferences that override a shared URL.
 
 Collect the configured core/curated sources and supported optional native categories before
 publication, using bounded windows and existing incremental caches. Do not expand to
 unbounded arXiv categories or backfill all history on every run. Export per-source membership
 through deduplication so source selection remains meaningful for papers discovered more
-than once. Test selection-dependent metadata as well as membership: merging all sources
-first can change the representative record compared with today's selected-source pipeline.
+than once. Prefer one canonical merged record with source-membership filtering; it need not
+reproduce the old server's selection-dependent representative metadata. Test that selecting
+a source shows the correct papers and preserves their provenance.
 
 Start with the existing supported category set, subject to measured export size and run
 time. If it cannot fit the agreed budgets, narrow the set explicitly before cutover rather
@@ -132,13 +145,14 @@ Arbitrary author, journal, ORCID, topic, or date-window queries are not part of 
 static service. Adding a discovery input requires a configuration change and a scheduled
 export. Browser filters operate only on the exported data.
 
-## RSS preservation and legacy URLs
+## RSS and clean subscription cutover
 
 RSS itself is straightforward on static hosting: generate valid XML and link to the same
 canonical feed files from reader buttons and HTML RSS autodiscovery tags.
 
-- Preserve item GUIDs and their permalink semantics; a host migration must not make every
-  existing paper appear new. Keep publication dates distinct from collection-added dates.
+- Use stable item GUIDs with correct permalink semantics across static exports. Preserving
+  old NAS GUIDs is optional; clients may treat papers as new when subscribing to the replacement
+  feed. Keep publication dates distinct from collection-added dates.
 - Preserve the current default RSS content, including optional authors. Reader-only date and
   author filters must not become RSS filters.
 - Generate each named feed and a bounded set of explicitly configured source presets.
@@ -151,35 +165,20 @@ canonical feed files from reader buttons and HTML RSS autodiscovery tags.
 - Check any required CORS behavior against the hosted XML. Pages does not provide arbitrary
   per-file response-header configuration; use same-origin data for the reader itself.
 
-### Why existing subscriptions need special treatment
+### Replacing existing URLs
 
 Today, `/?rss` and `/?feed=protein-design-archive&rss` return XML. Pages serves the same
-root HTML file regardless of those query parameters. Browser JavaScript, an HTML redirect,
-or an SPA-style 404 cannot repair this for RSS clients.
+root HTML file regardless of those query parameters. These old subscription URLs will no
+longer work as RSS, and no compatibility layer is planned.
 
-Two supported migration choices must be decided before DNS cutover:
+Update TRMNL and other actively used subscriptions to `/feed.xml` or the appropriate
+`/feeds/<feed-name>/feed.xml` once the new endpoints are live. Replace rather than keep both
+subscriptions where duplicate imports would be inconvenient. Document the new paths and
+provide clearly labeled subscription links in the reader.
 
-| Choice | Benefits | Costs and limitations |
-| --- | --- | --- |
-| Pure Pages, new XML URLs | Simplest hosting; no public application or edge logic | Update TRMNL and other subscriptions before switching DNS; unknown old subscriptions will break |
-| Pages plus Cloudflare legacy redirects | Can retain known old RSS subscription URLs without keeping the NAS public | Keep Cloudflare proxying for this hostname; maintain and test query-aware HTTP redirects and TLS/cache configuration |
-
-Prefer XML file URLs for all new subscriptions. If preserving existing subscriptions is
-required, retain a small Cloudflare compatibility layer for known default/named-feed/preset
-URLs. Confirm the account's available rule features before choosing Redirect Rules or a
-Worker; do not assume arbitrary query parsing or combinations fit a free rule quota.
-
-Match query parameters independent of order, including bare `rss`, and remove legacy
-parameters from the redirect destination. Test duplicate/encoded parameters and unknown feed
-names. Never redirect an unsupported custom feed to an unrelated default feed as if it were
-equivalent. Inventory actively used custom subscriptions and either publish matching presets
-or explicitly migrate them. Use temporary HTTP redirects during rehearsal before making
-them permanent; verify that the actual RSS clients follow them.
-
-Browser-only legacy URLs such as `/?feed=protein-design-archive` can be handled with a small
-client-side navigation shim, or with edge redirects if that layer is retained. The root HTML
-must still offer ordinary named-feed navigation without JavaScript. Preserve supported view
-parameters; report unsupported discovery parameters instead of silently ignoring them.
+Old `?feed=...` bookmarks, custom discovery queries, and article paths are likewise not
+guaranteed to work. Provide normal named-feed navigation and a helpful static 404 page;
+do not add legacy query translation or historical redirect generation.
 
 ## Subdomain, HTTPS, and icons
 
@@ -191,12 +190,11 @@ The eventual DNS target for `reading` is `michaelmvh.github.io`, not a repositor
 not the NAS tunnel target. With an Actions-based Pages deployment, the custom domain is
 configured in repository settings; a generated `CNAME` file is not a substitute.
 
-For pure Pages, use a DNS-only CNAME and enable HTTPS once GitHub provisions the certificate.
+Use a DNS-only CNAME and enable HTTPS once GitHub provisions the certificate.
 Allow for DNS propagation and certificate delays; do not promise a zero-downtime flip.
-If retaining Cloudflare redirect rules, they require a proxied record. Verify the Pages
-origin certificate and strict HTTPS to the origin, and test both origin and edge behavior.
-Exclude RSS from browser challenges. Validate cache behavior so a legacy HTML response or
-old feed is not retained after cutover. Do not disable TLS verification as a workaround.
+Remove this hostname's dependency on the Cloudflare Tunnel/proxy during cutover. Validate
+the Pages certificate and actual HTML/XML responses; do not disable TLS verification as
+a workaround.
 
 Keep `/favicon.svg` and `/apple-touch-icon.png` on the reading subdomain and include their
 existing link tags on every reader and article page. Reuse the actual reader assets rather
@@ -271,26 +269,27 @@ private reading data can be stored in the published output.
 
 ### Phase 1: Baseline and explicit decisions
 
-Inventory live feed URLs, custom RSS subscriptions, article paths, current icon assets, feed
-sizes, source freshness, and default/filter behavior. Capture representative fixtures,
-including optional-author and merged-version cases. Confirm publishing repository visibility,
-RSS compatibility choice, category coverage, refresh cadence, and retention budget.
+Identify actively used RSS subscriptions to update, current icon assets, feed sizes, source
+freshness, and default/filter behavior. Capture representative fixtures, including
+optional-author and merged-version cases. Confirm publishing repository visibility, useful
+RSS presets, category coverage, refresh cadence, and retention budget.
 
-Acceptance: the URL compatibility matrix and intentionally unsupported behaviors are agreed;
-there is no assumption that query-based RSS will work on Pages by itself.
+Acceptance: new URLs and intentionally unsupported behaviors are documented. A clean cutover
+is the agreed baseline; there is no legacy compatibility matrix or redirect workstream.
 
 ### Phase 2: Run-once export and durable identities
 
-Add the exporter, shared rendering support, static URL generation, article/alias registry,
+Add the exporter, shared rendering support, static URL generation, published article registry,
 public-data schema, source freshness manifest, and complete-output validation. Preserve the
 HTTP service as the production and rollback path.
 
 Acceptance: fixture exports are deterministic aside from intentional freshness metadata;
-XML parses; required files and links exist; known old article IDs still resolve; an upstream
-failure cannot replace good output with missing feeds. Rebuilding from retained metadata
-recreates old article pages after they leave active feed windows.
+XML parses; required files and links exist; static-site identities remain stable across
+successive exports; an upstream failure cannot replace good output with missing feeds.
+Rebuilding from retained metadata recreates static article pages after they leave active
+feed windows.
 
-### Phase 3: Static reader and RSS parity
+### Phase 3: Static reader and RSS behavior
 
 Implement browser filtering and URL state, named feeds, source presets, icon references,
 article navigation, and RSS autodiscovery. Keep discovery logic out of the browser.
@@ -312,14 +311,15 @@ data. Confirm that stopping the NAS leaves the preview reader and RSS available.
 
 ### Phase 5: Domain and subscription cutover
 
-Register the custom domain, record the old DNS/tunnel settings, and establish the selected
-legacy URL strategy. Migrate known RSS clients or stage and verify redirects. Switch only
-the reading hostname, complete HTTPS checks, and verify the production reader, article
-deep links, feed responses, icons, and freshness display.
+Register the custom domain and record the old DNS/tunnel settings. Switch only the reading
+hostname to the DNS-only Pages target, complete HTTPS checks, and verify the production
+reader, new article deep links, feed responses, icons, and freshness display. Update actively
+used RSS clients and bookmarks to the new URLs.
 
-Acceptance: TRMNL and a general RSS client fetch actual XML without duplicate-item floods;
-supported legacy URLs behave as documented; article and icon URLs work on the custom domain;
-the portfolio and mail configuration remain unchanged.
+Acceptance: TRMNL and a general RSS client fetch actual XML at the new paths; repeat exports
+do not create duplicate-item floods. A one-time reimport during migration is acceptable.
+New article and icon URLs work on the custom domain; the portfolio and mail configuration
+remain unchanged. Legacy URL behavior is not a cutover gate.
 
 ### Phase 6: Observation and retirement
 
@@ -337,17 +337,16 @@ Before cutover, retain the previous application image reference, Compose/environ
 DNS/tunnel mapping, and known-working RSS URLs. Do not delete persistent discovery caches.
 
 For bad generated content, redeploy a known-good publishing revision. For cutover problems,
-restore the reading hostname's previous tunnel mapping and disable conflicting edge rules;
-DNS caches may delay recovery. Keep redirects reversible during observation. Because some
-clients may already use `/feed.xml` and named static paths, prepare compatible routes in the
-fallback service before cutover, or retain a known-good static origin for those URLs.
-Rollback must account for both old and newly issued subscription URLs.
+restore the reading hostname's previous tunnel mapping and proxy setting; DNS caches may
+delay recovery. If reverting to the NAS service, manually restore the old RSS subscription
+URLs in actively used clients. Temporary interruption and bookmark/subscription changes are
+acceptable; do not add static-path compatibility routes to the fallback service. Prefer
+redeploying a known-good static revision when possible to avoid another URL transition.
 
 ## Decisions required before implementation
 
 - Final publishing repository name, visibility, and publishing credential mechanism.
-- Pure Pages with migrated subscriptions, or Pages plus legacy Cloudflare redirects.
-- Which custom/source-specific RSS subscriptions need published presets.
+- Which source-specific RSS presets are useful in the new service.
 - Optional-source coverage, daily schedule, notification channel, and stale-data policy.
 - Article retention/growth budget and backup/restore procedure.
 
@@ -362,4 +361,3 @@ approval.
 - [GitHub Pages custom domains](https://docs.github.com/en/pages/configuring-a-custom-domain-for-your-github-pages-site/managing-a-custom-domain-for-your-github-pages-site)
 - [GitHub Pages custom workflows](https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages)
 - [GitHub Pages limits](https://docs.github.com/en/pages/getting-started-with-github-pages/github-pages-limits)
-- [Cloudflare redirects and proxy requirements](https://developers.cloudflare.com/rules/url-forwarding/)
