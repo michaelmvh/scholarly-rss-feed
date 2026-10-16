@@ -136,13 +136,12 @@ async fn fetch_batch(
     }
     let url = url::Url::parse_with_params(&format!("{API_BASE}/works"), parameters)
         .map_err(|error| format!("Failed to build OpenAlex enrichment URL: {error}"))?;
-    let mut response = client
-        .get(url)
+    let mut response = crate::openalex::request(client, url)?
         .send()
         .await
-        .map_err(|error| format!("OpenAlex enrichment request failed: {error}"))?
+        .map_err(crate::openalex::request_error)?
         .error_for_status()
-        .map_err(|error| format!("OpenAlex enrichment request failed: {error}"))?;
+        .map_err(crate::openalex::request_error)?;
     if response
         .content_length()
         .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)

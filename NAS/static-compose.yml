@@ -3,6 +3,7 @@ services:
     image: ${STATIC_IMAGE:?Set STATIC_IMAGE to the reviewed exporter image tag or digest}
     environment:
       GSRF_MAILTO: ${GSRF_MAILTO:?Set the OpenAlex contact address}
+      GSRF_OPENALEX_API_KEY: ${GSRF_OPENALEX_API_KEY:-}
       GSRF_PROVIDER: ${GSRF_PROVIDER:-openalex}
       GSRF_CACHE_DIR: /cache
     volumes:

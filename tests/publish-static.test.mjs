@@ -50,7 +50,8 @@ esac
   const env = {
     ...gitEnv, PUBLISH_CHECKOUT: checkout, WORK_ROOT: work,
     SITE_URL: "https://example.org/", STATIC_IMAGE: "fixture", CACHE_VOLUME: "fixture",
-    GSRF_MAILTO: "fixture@example.org", DOCKER_BIN: docker, GH_BIN: gh, BOOTSTRAP_EXPORT: "1",
+    GSRF_MAILTO: "fixture@example.org", GSRF_OPENALEX_API_KEY: "fixture-key",
+    DOCKER_BIN: docker, GH_BIN: gh, BOOTSTRAP_EXPORT: "1",
   };
   return {
     root, checkout, work, git,

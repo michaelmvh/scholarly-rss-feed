@@ -69,7 +69,7 @@ static CONFIG_PATH: OnceLock<PathBuf> = OnceLock::new();
 const DEFAULT_FROM_DAYS: u32 = 365;
 const DEFAULT_NATIVE_FROM_DAYS: u32 = 7;
 const DEFAULT_MAX_OPENALEX_WORKS: usize = 20_000;
-const OPENALEX_PAGE_SIZE: usize = 200;
+const OPENALEX_PAGE_SIZE: usize = 100;
 const MAX_CONCURRENT_CONNECTIONS: usize = 64;
 const MAX_CONCURRENT_FEED_BUILDS: usize = 8;
 const MAX_GENERATED_FEEDS: usize = 128;
@@ -1176,8 +1176,7 @@ async fn resolve_orcid(orcid: &str) -> Result<Option<String>, String> {
     if let Some(m) = mailto() {
         url.query_pairs_mut().append_pair("mailto", &m);
     }
-    let response = CLIENT
-        .get(url)
+    let response = openalex::request(&CLIENT, url)?
         .send()
         .await
         .map_err(|error| format!("OpenAlex ORCID lookup failed: {error}"))?;
@@ -1207,8 +1206,7 @@ async fn resolve_author_name(name: &str) -> Result<Option<(String, String)>, Str
     }
     let url = url::Url::parse_with_params(&format!("{API_BASE}/authors"), &pairs)
         .map_err(|error| format!("Failed to build OpenAlex author search URL: {error}"))?;
-    let response = CLIENT
-        .get(url)
+    let response = openalex::request(&CLIENT, url)?
         .send()
         .await
         .map_err(|error| format!("OpenAlex author search failed: {error}"))?
@@ -1237,8 +1235,7 @@ async fn resolve_issn(issn: &str) -> Result<Option<String>, String> {
     if let Some(m) = mailto() {
         url.query_pairs_mut().append_pair("mailto", &m);
     }
-    let response = CLIENT
-        .get(url)
+    let response = openalex::request(&CLIENT, url)?
         .send()
         .await
         .map_err(|error| format!("OpenAlex ISSN lookup failed: {error}"))?;
@@ -1268,8 +1265,7 @@ async fn resolve_journal_name(name: &str) -> Result<Option<(String, String)>, St
     }
     let url = url::Url::parse_with_params(&format!("{API_BASE}/sources"), &pairs)
         .map_err(|error| format!("Failed to build OpenAlex journal search URL: {error}"))?;
-    let response = CLIENT
-        .get(url)
+    let response = openalex::request(&CLIENT, url)?
         .send()
         .await
         .map_err(|error| format!("OpenAlex journal search failed: {error}"))?
@@ -1670,13 +1666,12 @@ async fn fetch_works_for_filter_from(
         }
         let url = url::Url::parse_with_params(&format!("{api_base}/works"), &pairs)
             .map_err(|error| format!("Failed to build OpenAlex URL: {error}"))?;
-        let response = client
-            .get(url)
+        let response = openalex::request(client, url)?
             .send()
             .await
-            .map_err(|error| format!("OpenAlex request failed: {error}"))?
+            .map_err(openalex::request_error)?
             .error_for_status()
-            .map_err(|error| format!("OpenAlex request failed: {error}"))?;
+            .map_err(openalex::request_error)?;
         let mut body = response
             .json::<WorksResponse>()
             .await
@@ -2991,7 +2986,7 @@ optional = true
         assert!(requests[1].contains("cursor=next-page"));
         assert!(requests
             .iter()
-            .all(|request| request.contains("per_page=200")));
+            .all(|request| request.contains("per_page=100")));
     }
 
     #[tokio::test]

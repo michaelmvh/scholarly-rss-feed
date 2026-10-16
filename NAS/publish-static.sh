@@ -7,6 +7,9 @@ set -eu
 : "${STATIC_IMAGE:?Set STATIC_IMAGE to a reviewed image tag or digest}"
 : "${CACHE_VOLUME:?Set CACHE_VOLUME to a dedicated static-export cache volume}"
 : "${GSRF_MAILTO:?Set GSRF_MAILTO}"
+if [ "${GSRF_PROVIDER:-openalex}" = openalex ]; then
+  : "${GSRF_OPENALEX_API_KEY:?Set a private verified OpenAlex API key for cursor paging}"
+fi
 
 DOCKER_BIN=${DOCKER_BIN:-docker}
 GH_BIN=${GH_BIN:-gh}

@@ -2,8 +2,9 @@
 
 Generates a single RSS feed of recent scientific publications for one or more authors
 **and/or journals**, sorted newest-first. Data is parsed from
-[OpenAlex](https://openalex.org) (a free, open catalog of scholarly works — no API key
-required). The project's original Google Scholar scraper is retained as an archived fallback
+[OpenAlex](https://openalex.org), a free, open catalog of scholarly works. Basic queries work
+without a key, but cursor paging beyond the first page requires a verified free API key.
+The project's original Google Scholar scraper is retained as an archived fallback
 provider that can be enabled with one environment variable.
 
 Feeds can be defined in a config file so a feed URL never has to change. Each URL provides a
@@ -42,7 +43,7 @@ The NAS pulls the new image and recreates the container
 
 The application and `feeds.toml` are both baked into the image. The NAS therefore needs only
 [`NAS/docker-compose.yml`](./NAS/docker-compose.yml) and a private `.env` containing the
-Cloudflare token. It does not clone the source or compile Rust.
+Cloudflare token and provider settings. It does not clone the source or compile Rust.
 
 The image and Compose file update independently:
 
@@ -140,6 +141,20 @@ journals, or topics change.
 Set `GSRF_MAILTO` to a real contact address before production use. OpenAlex uses it for its
 polite API pool; it is sent to OpenAlex but is not included in the RSS feed or baked into the
 container image.
+
+Set `GSRF_OPENALEX_API_KEY` privately for production feeds and static publication. Get a
+verified free key from [OpenAlex Settings](https://openalex.org/settings/api-key); see
+[OpenAlex authentication](https://help.openalex.org/api/authentication/). The contact address
+does not replace authentication. The key is sent only to the HTTPS OpenAlex API as a sensitive
+Authorization header, never as a query parameter or exported metadata. All OpenAlex lookups,
+pagination, and curated enrichment use the same helper.
+
+A bounded single-page feed can still run without a key. Larger feeds may fail with HTTP 401
+when following the first cursor; the full-config local migration rehearsal encountered
+exactly this requirement. Provide the key through a private environment or uncommitted
+Compose `.env`, not a PR, image build argument, public repository, or chat message.
+OpenAlex work pages use the documented 100-result maximum. Rate/budget errors remain
+explicit rather than silently truncating output or retrying indefinitely.
 
 ```toml
 default_feed = "myfield"           # served at bare "/"

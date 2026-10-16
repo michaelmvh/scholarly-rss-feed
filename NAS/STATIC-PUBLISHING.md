@@ -30,6 +30,9 @@ mounts, scheduler environment, SSH credentials, and live-provider scale still ne
 6. Place `static-compose.yml` and `publish-static.sh` together in the deployment directory.
    Configure the variables shown in `static.env.example` in a private scheduler wrapper.
    Do not commit that wrapper or contact/credential configuration.
+   For OpenAlex, configure `GSRF_OPENALEX_API_KEY` using a verified free key from the provider.
+   Full feeds require cursor paging, which is not available anonymously beyond the first
+   page. The publisher checks that this setting is present before starting an OpenAlex run.
 7. Create a dedicated exporter cache with `docker volume create reading-static-cache` and
    set `CACHE_VOLUME` accordingly. Do not share a writable cache with the still-running HTTP
    container: their snapshot refreshes can race. Start empty, or seed from a consistent

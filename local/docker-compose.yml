@@ -7,6 +7,7 @@ services:
     container_name: scholar-rss
     environment:
       - GSRF_MAILTO=${GSRF_MAILTO:-}
+      - GSRF_OPENALEX_API_KEY=${GSRF_OPENALEX_API_KEY:-}
       - GSRF_PROVIDER=${GSRF_PROVIDER:-openalex}
       - GSRF_CACHE_DIR=/cache
     volumes:
