@@ -2,7 +2,7 @@
   "name": "scholarly-rss-reader-tests",
   "private": true,
   "scripts": {
-    "test": "node --test tests/reader.test.cjs tests/static-model.test.mjs",
+    "test": "node --test tests/reader.test.cjs tests/static-model.test.mjs tests/publish-static.test.mjs",
     "test:browser": "playwright test"
   },
   "devDependencies": {

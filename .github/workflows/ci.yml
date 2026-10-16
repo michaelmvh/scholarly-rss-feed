@@ -19,6 +19,7 @@ jobs:
       - run: cargo test --locked
       - run: npm ci
       - run: npm test
+      - run: sh -n NAS/publish-static.sh
       - name: Generate synthetic static preview
         run: cargo test --locked export_fixture -- --ignored
         env:

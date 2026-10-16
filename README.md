@@ -118,6 +118,13 @@ GSRF_TEST_EXPORT_DIR=/tmp/reading-fixture npm run test:browser
 Generate the fixture first using the preceding command. The browser runner owns and stops
 its local static server; it never needs the NAS or live provider APIs.
 
+For the staged NAS migration, see [the static publication runbook](NAS/STATIC-PUBLISHING.md),
+[`NAS/static-compose.yml`](NAS/static-compose.yml), and
+[`NAS/publish-static.sh`](NAS/publish-static.sh). These are separate from the current
+always-on deployment. The publisher requires a reviewed exporter image, a clean publishing
+checkout, scoped Git/GitHub CLI credentials, explicit configuration, and a successful
+Pages deploy job before reporting publication success.
+
 ## Feed configuration
 
 Named feeds live in [`feeds.toml`](./feeds.toml), keeping the public URL stable when authors,
