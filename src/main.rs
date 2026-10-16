@@ -1371,6 +1371,13 @@ fn oldest_cache_key(channels: &HashMap<FeedCacheKey, CachedFeed>) -> Option<Feed
 }
 
 async fn build_feed(request: &FeedRequest) -> Result<GeneratedFeed, String> {
+    build_feed_with_policy(request, discovery::snapshot::RefreshPolicy::AllowStale).await
+}
+
+async fn build_feed_with_policy(
+    request: &FeedRequest,
+    policy: discovery::snapshot::RefreshPolicy,
+) -> Result<GeneratedFeed, String> {
     println!(
         "Building RSS channel for authors [{}] journals [{}] curated sources [{}] from {}",
         request.author_ids.join(", "),
@@ -1399,7 +1406,7 @@ async fn build_feed(request: &FeedRequest) -> Result<GeneratedFeed, String> {
         .categories(vec![Category::from("Scientific Research")])
         .build();
 
-    let works = fetch_works(request).await?;
+    let works = fetch_works(request, policy).await?;
     let items = works.iter().map(work_to_item).collect::<Vec<_>>();
     channel.set_items(items);
 
@@ -1505,19 +1512,21 @@ fn channel_metadata(request: &FeedRequest) -> (String, String) {
     (title, description)
 }
 
-async fn fetch_works(request: &FeedRequest) -> Result<Vec<Work>, String> {
+async fn fetch_works(request: &FeedRequest, policy: discovery::snapshot::RefreshPolicy) -> Result<Vec<Work>, String> {
     let (provider_works, curated_works, biorxiv_works, arxiv_works) = tokio::join!(
         fetch_provider_works(request),
-        curated::fetch_sources(&CLIENT, &request.curated_sources, &request.from),
+        curated::fetch_sources(&CLIENT, &request.curated_sources, &request.from, policy),
         discovery::biorxiv::fetch_categories(
             &CLIENT,
             &request.biorxiv_categories,
             &request.native_from,
+            policy,
         ),
         discovery::arxiv::fetch_categories(
             &CLIENT,
             &request.arxiv_categories,
             &request.native_from,
+            policy,
         ),
     );
     let mut provider_works = provider_works?;

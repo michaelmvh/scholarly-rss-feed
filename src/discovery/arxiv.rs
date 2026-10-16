@@ -1,5 +1,5 @@
 use crate::discovery::snapshot::{
-    resolve_refresh, DiscoverySnapshot, RefreshBatch, RefreshOutcome,
+    resolve_refresh, DiscoverySnapshot, RefreshBatch, RefreshOutcome, RefreshPolicy,
 };
 use crate::openalex::{Author, Authorship, Location, Source, Work};
 use crate::provenance::DiscoverySource;
@@ -55,6 +55,7 @@ pub async fn fetch_categories(
     client: &reqwest::Client,
     categories: &[String],
     retention_from: &str,
+    policy: RefreshPolicy,
 ) -> Result<Vec<Work>, String> {
     validate_categories(categories)?;
     if categories.is_empty() {
@@ -114,6 +115,7 @@ pub async fn fetch_categories(
             snapshot.into_works_since(retention_from)
         }
         RefreshOutcome::Stale { snapshot, error } => {
+            policy.check_failure(&error)?;
             eprintln!("{error}; using the last successful arXiv snapshot");
             snapshot.into_works_since(retention_from)
         }

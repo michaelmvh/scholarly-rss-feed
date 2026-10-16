@@ -1,6 +1,8 @@
 use crate::config::Config;
 use crate::reader::{static_render, Publication};
-use crate::{build_feed, resolve_feed_request, GeneratedFeed, Provider, ResolveFeedError};
+use crate::{
+    build_feed_with_policy, resolve_feed_request, GeneratedFeed, Provider, ResolveFeedError,
+};
 use rss::GuidBuilder;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -273,7 +275,11 @@ pub(crate) async fn run(args: &ExportArgs, config_path: &Path) -> Result<(), Str
                     | ResolveFeedError::Provider(message) => message,
                 })?
                 .ok_or_else(|| format!("Feed {name} did not resolve."))?;
-        let generated = build_feed(&request).await?;
+        let generated = build_feed_with_policy(
+            &request,
+            crate::discovery::snapshot::RefreshPolicy::RequireFresh,
+        )
+        .await?;
         if generated.reader.publications.is_empty() {
             return Err(format!(
                 "Refusing to publish an empty required feed: {name}."
@@ -404,7 +410,7 @@ fn export(
         json(&serde_json::json!({
             "schema_version": SCHEMA_VERSION, "generated_at": generated_at,
             "generator_version": env!("CARGO_PKG_VERSION"), "feeds": counts,
-            "source_freshness": "Not verified: providers may reuse cached source snapshots."
+            "source_freshness": "Required discovery refreshes must succeed; optional enrichment may be unavailable."
         }))?,
     );
     for (name, bytes) in files {

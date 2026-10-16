@@ -4,6 +4,21 @@ use chrono::{Duration, NaiveDate, Utc};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RefreshPolicy {
+    AllowStale,
+    RequireFresh,
+}
+
+impl RefreshPolicy {
+    pub fn check_failure(self, error: &str) -> Result<(), String> {
+        match self {
+            Self::AllowStale => Ok(()),
+            Self::RequireFresh => Err(format!("Required discovery refresh failed: {error}")),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct DiscoverySnapshot<M> {
     source_key: String,
@@ -211,6 +226,21 @@ mod tests {
     use super::*;
     use crate::provenance::DiscoverySource;
     use serde_json::json;
+
+    #[test]
+    fn static_refresh_policy_rejects_fallback_without_changing_http_policy() {
+        let previous = DiscoverySnapshot::new("source", 1, None, Vec::new(), ());
+        let outcome = resolve_refresh(
+            "source", 1, Some(previous), Err("upstream unavailable".to_string()), "2026-01-01",
+        ).unwrap();
+        match outcome {
+            RefreshOutcome::Stale { error, .. } => {
+                assert!(RefreshPolicy::AllowStale.check_failure(&error).is_ok());
+                assert!(RefreshPolicy::RequireFresh.check_failure(&error).unwrap_err().contains("upstream unavailable"));
+            }
+            RefreshOutcome::Updated(_) => panic!("failed refresh must not be reported as updated"),
+        }
+    }
 
     fn work(id: &str, doi: &str, date: &str, source: DiscoverySource) -> Work {
         let mut work: Work = serde_json::from_value(json!({

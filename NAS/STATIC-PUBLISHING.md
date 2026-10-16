@@ -74,8 +74,10 @@ No-change runs skip the commit and workflow.
 
 Publishing validation rejects a feed disappearing or losing more than 40% of its records.
 For an intentional change, review the output and use `ALLOW_FEED_SHRINK=true` for that run
-only. Required feeds must still contain records. Upstream caches may be reused; the current
-snapshot timestamp is not a claim that every source was refreshed.
+only. Required feeds must still contain records. Static export requires discovery refreshes
+to succeed, while allowing incremental cache reuse and conditional 304 responses. A failed
+required refresh leaves the previously deployed snapshot live; optional metadata enrichment
+can fail with an explicit log without discarding otherwise usable records.
 
 ## Failure recovery
 

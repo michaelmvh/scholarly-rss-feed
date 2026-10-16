@@ -84,9 +84,15 @@ Use a site URL with a path prefix for a project-site preview.
 
 `data/archive.json` is public, retained rendering metadata, not a private provider cache.
 Keep the entire previous output backed up. Empty required feeds, unsafe publication URLs,
-ambiguous identities, and malformed previous archives stop publication. Source integrations
-may still reuse their existing caches: `status.json` reports snapshot generation time, not
-a guarantee that every upstream source was refreshed.
+ambiguous identities, and malformed previous archives stop publication. Static export
+requires successful discovery refreshes: it does not publish last-known-good curated,
+bioRxiv, or arXiv data after a refresh failure. Incremental caches and conditional 304
+responses still avoid full historical downloads. Optional metadata enrichment may fail
+with an explicit log while base records remain usable. The HTTP service retains its
+existing stale-cache fallback policy.
+
+`status.json` reports snapshot generation time and the required refresh policy, not the
+publication time of the upstream papers or a guarantee that source catalogs are complete.
 
 For an offline synthetic preview, without provider requests:
 
