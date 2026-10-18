@@ -141,9 +141,11 @@ article history, caches, lock, and a credential-free `last-run.json`.
 
 GitHub and OpenAlex credentials are read from separate read-only secret files. The GitHub
 token is scoped to `reading-site`, with Contents read/write and Actions read permission.
-Only Git and GitHub API requests receive that token; the exporter receives only its OpenAlex
-key, and npm/validation receive neither. Git remotes are checked before use, and tokens are
-not embedded in URLs, generated files, or the image.
+Only Git's child-process environment and GitHub API requests receive that token; the exporter
+environment receives only its OpenAlex key, and npm/validation environments receive neither.
+Mounted secret files remain within the container's shared trust boundary: use only reviewed
+images and publishing-repository code. Git remotes are checked before use, and tokens are not
+embedded in URLs, generated files, or the image.
 
 The Dockerfile has explicit `server` and `publisher` targets; the default remains `server`.
 GitHub Actions publishes both images for `linux/amd64`. Publisher orchestration is strict

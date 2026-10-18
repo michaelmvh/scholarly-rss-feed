@@ -56,6 +56,8 @@ openalex-api-key.txt
 
 Do not paste either value into a PR/chat or include it in an image, Compose YAML, task
 command, or `publisher.env`. The files are mounted read-only as Compose secrets.
+Read-only mounting prevents modification, not access by other code in the same container;
+use only the reviewed publisher image and publishing-repository code.
 
 ## 2. Create the DSM folders and configuration
 

@@ -53,7 +53,17 @@ jobs:
           cache-to: type=gha,mode=max,scope=publisher-ci
       - name: Check publisher image without a network or Docker socket
         run: |
-          docker run --rm --network none --read-only --tmpfs /tmp reading-publisher:test --help
-          docker run --rm --network none --read-only --tmpfs /tmp \
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --tmpfs /tmp reading-publisher:test --help
+          if output=$(docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --tmpfs /tmp --entrypoint scholarly-rss-feed \
+            reading-publisher:test --export /tmp/site --site-url https://example.org/ \
+            --config /tmp/missing-feeds.toml 2>&1); then
+            echo "Missing exporter configuration unexpectedly succeeded."
+            exit 1
+          fi
+          printf '%s\n' "$output" | grep -F 'Static export requires a configured default_feed.'
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --tmpfs /tmp \
             -v "$PWD:/project:ro" -w /project --entrypoint node \
             reading-publisher:test --test tests/publisher.test.mts
