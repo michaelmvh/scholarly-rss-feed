@@ -22,6 +22,11 @@ The NAS no longer needs to be reachable by readers. A NAS outage delays new publ
 but does not take down previously published pages or RSS. Freshness changes from
 request-driven generation to scheduled updates plus deployment time.
 
+The scheduled job uses a self-contained publisher image with the existing Rust exporter,
+Node.js validation, Git, and GitHub REST polling. DSM launches the container; no host Git,
+Node, rsync, GitHub CLI, SSH service, or Docker socket mount is required. The first run uses
+prepare-only mode before publication is explicitly enabled.
+
 Use a separate publishing repository, provisionally named `reading-site`. Keep the Rust
 application, templates, browser code, icons, feed configuration, and exporter tests in
 `scholarly-rss-feed`. The publishing repository contains generated public output and a small
@@ -224,11 +229,12 @@ output directory into the publishing checkout, leaving its workflow and reposito
 untouched. Push a complete snapshot in one commit and deploy it as one Pages artifact.
 Never upload files incrementally to the live site.
 
-Use a repository-scoped write credential stored privately on the NAS, such as a dedicated
-SSH deploy key. Bootstrap the deployment workflow separately so routine data publication
-does not require workflow-editing privileges. Protect credentials, avoid logging them,
-and document rotation/revocation. Confirm the credential and branch rules actually allow
-the intended push/deployment flow.
+Use a fine-grained GitHub token scoped to the publishing repository, with Contents read/write
+and Actions read permissions. Mount it and the OpenAlex key as separate read-only secret
+files, not image layers or Compose environment values. Bootstrap the deployment workflow
+separately so routine data publication does not require workflow-editing privileges.
+Protect credentials, avoid logging them, and document rotation/revocation. Confirm the
+credential and branch rules actually allow the intended push/deployment flow.
 
 Use deterministic ordering and content-aware timestamps to avoid rewriting every article or
 RSS item daily. Push only public content or freshness changes. It is acceptable for a small

@@ -14,8 +14,21 @@ RUN mkdir src \
 COPY src ./src
 RUN touch src/main.rs && cargo build --release
 
-# ---- Runtime stage ----
-FROM debian:bookworm-slim
+# ---- One-shot publisher: no Docker daemon or host publishing tools required ----
+FROM node:24-bookworm-slim AS publisher
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates \
+    && find /var/lib/apt/lists -mindepth 1 -delete
+WORKDIR /opt/publisher
+COPY --from=builder /app/target/release/scholarly-rss-feed /usr/local/bin/scholarly-rss-feed
+COPY publisher/ ./
+RUN chmod 755 /opt/publisher/git-askpass.sh
+COPY feeds.toml /config/feeds.toml
+ENV GSRF_CONFIG=/config/feeds.toml
+ENTRYPOINT ["node", "/opt/publisher/main.mts"]
+
+# ---- Existing HTTP server remains the default build target ----
+FROM debian:bookworm-slim AS server
 WORKDIR /app
 
 # TLS trust for provider API calls is provided by rustls, so no

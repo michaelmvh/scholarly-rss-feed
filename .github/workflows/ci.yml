@@ -18,8 +18,10 @@ jobs:
           node-version: '24'
       - run: cargo test --locked
       - run: npm ci
+      - run: npm run typecheck:publisher
+      - run: npm run check:publisher-compose
       - run: npm test
-      - run: sh -n NAS/publish-static.sh
+      - run: sh -n publisher/git-askpass.sh
       - name: Generate synthetic static preview
         run: cargo test --locked export_fixture -- --ignored
         env:
@@ -34,3 +36,24 @@ jobs:
           name: synthetic-static-preview
           path: ${{ runner.temp }}/static-preview
           if-no-files-found: error
+
+  publisher-container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: publisher
+          load: true
+          tags: reading-publisher:test
+          cache-from: type=gha,scope=publisher-ci
+          cache-to: type=gha,mode=max,scope=publisher-ci
+      - name: Check publisher image without a network or Docker socket
+        run: |
+          docker run --rm --network none --read-only --tmpfs /tmp reading-publisher:test --help
+          docker run --rm --network none --read-only --tmpfs /tmp \
+            -v "$PWD:/project:ro" -w /project --entrypoint node \
+            reading-publisher:test --test tests/publisher.test.mts

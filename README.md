@@ -25,6 +25,7 @@ The repository and published container are available at:
 - **Source:** <https://github.com/Michaelmvh/scholarly-rss-feed>
 - **Container:** <https://github.com/Michaelmvh/scholarly-rss-feed/pkgs/container/scholarly-rss-feed>
 - **Image:** `ghcr.io/michaelmvh/scholarly-rss-feed:latest`
+- **One-shot publisher image:** `ghcr.io/michaelmvh/scholarly-rss-feed-publisher:latest`
 
 The production update path is:
 
@@ -128,10 +129,27 @@ its local static server; it never needs the NAS or live provider APIs.
 
 For the staged NAS migration, see [the static publication runbook](NAS/STATIC-PUBLISHING.md),
 [`NAS/static-compose.yml`](NAS/static-compose.yml), and
-[`NAS/publish-static.sh`](NAS/publish-static.sh). These are separate from the current
-always-on deployment. The publisher requires a reviewed exporter image, a clean publishing
-checkout, scoped Git/GitHub CLI credentials, explicit configuration, and a successful
-Pages deploy job before reporting publication success.
+[`NAS/publisher.env.example`](NAS/publisher.env.example). A separate one-shot publisher
+container includes the Rust exporter, Node.js validation runtime, and Git. It polls GitHub's
+REST API instead of requiring GitHub CLI. No Git/Node/rsync installation, SSH service, or
+Docker socket is needed on the NAS. The existing always-on reader remains separate.
+
+The publisher defaults to `PUBLISH_MODE=prepare`: it generates and validates output without
+committing, pushing, or deploying. `PUBLISH_MODE=publish` additionally pushes public output
+and verifies the matching Pages deploy job. A dedicated state mount preserves the checkout,
+article history, caches, lock, and a credential-free `last-run.json`.
+
+GitHub and OpenAlex credentials are read from separate read-only secret files. The GitHub
+token is scoped to `reading-site`, with Contents read/write and Actions read permission.
+Only Git and GitHub API requests receive that token; the exporter receives only its OpenAlex
+key, and npm/validation receive neither. Git remotes are checked before use, and tokens are
+not embedded in URLs, generated files, or the image.
+
+The Dockerfile has explicit `server` and `publisher` targets; the default remains `server`.
+GitHub Actions publishes both images for `linux/amd64`. Publisher orchestration is strict
+TypeScript run directly by Node.js 24. Use `npm run typecheck:publisher` and `npm test` for
+local checks. CI also builds the real publisher image and runs its orchestration tests
+with no network, a read-only root filesystem, and no Docker socket.
 
 ## Feed configuration
 

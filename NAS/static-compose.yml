@@ -1,35 +1,29 @@
 services:
-  exporter:
-    image: ${STATIC_IMAGE:?Set STATIC_IMAGE to the reviewed exporter image tag or digest}
+  publisher:
+    image: ghcr.io/michaelmvh/scholarly-rss-feed-publisher:latest
+    init: true
+    env_file:
+      - publisher.env
     environment:
-      GSRF_MAILTO: ${GSRF_MAILTO:?Set the OpenAlex contact address}
-      GSRF_OPENALEX_API_KEY: ${GSRF_OPENALEX_API_KEY:-}
-      GSRF_PROVIDER: ${GSRF_PROVIDER:-openalex}
-      GSRF_CACHE_DIR: /cache
+      PUBLISH_STATE_DIR: /state
+      PUBLISH_GITHUB_TOKEN_FILE: /run/secrets/github_token
+      GSRF_OPENALEX_API_KEY_FILE: /run/secrets/openalex_api_key
     volumes:
-      - discovery-cache:/cache
-      - ${STATIC_RUN_DIR:?Set by publish-static.sh}:/work
-      - ${PUBLISH_CHECKOUT:?Set the reading-site checkout path}:/previous:ro
-    restart: "no"
-
-  validator:
-    image: node:24-bookworm-slim
-    working_dir: /publisher
-    environment:
-      PREVIOUS_SITE: ${VALIDATION_PREVIOUS_SITE:-}
-      ALLOW_FEED_SHRINK: ${ALLOW_FEED_SHRINK:-false}
-    volumes:
-      - ${PUBLISH_CHECKOUT:?Set the reading-site checkout path}:/publisher:ro
-      - ${STATIC_RUN_DIR:?Set by publish-static.sh}:/candidate:ro
+      - ./state:/state
+    secrets:
+      - github_token
+      - openalex_api_key
+    read_only: true
     tmpfs:
-      - /publisher/node_modules
-    command:
-      - sh
-      - -c
-      - npm ci --ignore-scripts --no-audit --no-fund && node scripts/validate.ts /candidate/site
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     restart: "no"
 
-volumes:
-  discovery-cache:
-    external: true
-    name: ${CACHE_VOLUME:?Set the dedicated static-export cache volume name}
+secrets:
+  github_token:
+    file: ./secrets/github-token.txt
+  openalex_api_key:
+    file: ./secrets/openalex-api-key.txt
