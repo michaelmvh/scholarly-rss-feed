@@ -9,5 +9,6 @@
 # Cloudflare Tunnel token (docker-compose.nas.yml) — never commit secrets.
 .env
 /NAS/publisher.env
+/NAS/secrets.env
 /NAS/secrets/
 /NAS/state/

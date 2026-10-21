@@ -171,23 +171,29 @@ test("guards bootstrap, dirty checkouts, unexpected remotes, concurrency, and cl
   } finally { await rm(f.root, { recursive: true }); }
 });
 
-test("configuration uses files for secrets and prepare is the default", async () => {
+test("configuration reads one dotenv credentials file and prepare is the default", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "publisher-config-"));
   try {
-    const github = path.join(root, "github.txt");
-    const openalex = path.join(root, "openalex.txt");
-    await writeFile(github, "fixture-gh\n"); await writeFile(openalex, "fixture-oa\n");
+    const secrets = path.join(root, "secrets.env");
+    await writeFile(secrets, '# Private values\nPUBLISH_GITHUB_TOKEN="fixture-gh"\nGSRF_OPENALEX_API_KEY=fixture-oa\n');
     const env = {
       SITE_URL: "https://example.org/", PUBLISH_GIT_NAME: "Fixture", PUBLISH_GIT_EMAIL: "fixture@example.org",
-      GSRF_MAILTO: "fixture@example.org", PUBLISH_GITHUB_TOKEN_FILE: github, GSRF_OPENALEX_API_KEY_FILE: openalex,
+      GSRF_MAILTO: "fixture@example.org", PUBLISH_SECRETS_FILE: secrets,
     };
     const config = await loadConfig(env);
     assert.equal(config.mode, "prepare");
     assert.equal(config.githubToken, "fixture-gh");
+    assert.equal(config.openalexKey, "fixture-oa");
     await assert.rejects(loadConfig({ ...env, PUBLISH_MODE: "unsafe" }), /PUBLISH_MODE/);
     await assert.rejects(loadConfig({ ...env, PUBLISH_REPOSITORY: "https://evil.example/repo" }), /owner\/repository/);
-    await writeFile(github, "bad\ntoken");
+    await writeFile(secrets, 'PUBLISH_GITHUB_TOKEN="bad\ntoken"\nGSRF_OPENALEX_API_KEY=fixture-oa\n');
     await assert.rejects(loadConfig(env), /control characters/);
+    await writeFile(secrets, "PUBLISH_GITHUB_TOKEN=fixture-gh\n");
+    await assert.rejects(loadConfig(env), /GSRF_OPENALEX_API_KEY is missing/);
+    await writeFile(secrets, "PUBLISH_GITHUB_TOKEN=fixture-gh\nGSRF_OPENALEX_API_KEY=fixture-oa\nPUBLISH_MODE=publish\n");
+    await assert.rejects(loadConfig(env), /keep other settings in publisher.env/);
+    await writeFile(secrets, "x".repeat(65_537));
+    await assert.rejects(loadConfig(env), /64 KiB/);
   } finally { await rm(root, { recursive: true }); }
 });
 

@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, rmdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { promisify } from "node:util";
+import { parseEnv, promisify } from "node:util";
 import { githubClient, waitForDeployment, type GitHubRequest } from "./github.mts";
 
 const execute = promisify(execFile);
@@ -46,12 +46,26 @@ function boolean(env: NodeJS.ProcessEnv, name: string): boolean {
   return value === "true";
 }
 
-async function secret(file: string, label: string): Promise<string> {
+async function credentials(file: string): Promise<{ githubToken: string; openalexKey: string }> {
   const metadata = await lstat(file);
-  if (!metadata.isFile() || metadata.size > 65_536) throw new Error(`${label} must be a small plain text file`);
-  const value = (await readFile(file, "utf8")).trim();
-  if (!/^[\x21-\x7e]+$/.test(value)) throw new Error(`${label} is empty or contains whitespace/control characters; save only the key, without quotes`);
-  return value;
+  if (!metadata.isFile() || metadata.size > 65_536) throw new Error("secrets.env must be a plain text file no larger than 64 KiB");
+  const contents = await readFile(file, "utf8");
+  let values: ReturnType<typeof parseEnv>;
+  try {
+    values = parseEnv(contents);
+  } catch {
+    throw new Error("Cannot parse secrets.env; use plain KEY=VALUE entries");
+  }
+  const allowed = ["PUBLISH_GITHUB_TOKEN", "GSRF_OPENALEX_API_KEY"];
+  if (Object.keys(values).some((key) => !allowed.includes(key))) {
+    throw new Error("secrets.env must contain only PUBLISH_GITHUB_TOKEN and GSRF_OPENALEX_API_KEY; keep other settings in publisher.env");
+  }
+  const key = (name: string) => {
+    const value = values[name]?.trim();
+    if (!value || !/^[\x21-\x7e]+$/.test(value)) throw new Error(`${name} is missing or contains whitespace/control characters in secrets.env`);
+    return value;
+  };
+  return { githubToken: key("PUBLISH_GITHUB_TOKEN"), openalexKey: key("GSRF_OPENALEX_API_KEY") };
 }
 
 export async function loadConfig(env: NodeJS.ProcessEnv): Promise<Config> {
@@ -74,8 +88,7 @@ export async function loadConfig(env: NodeJS.ProcessEnv): Promise<Config> {
     gitName: required(env, "PUBLISH_GIT_NAME"),
     gitEmail,
     mailto,
-    githubToken: await secret(env.PUBLISH_GITHUB_TOKEN_FILE || "/run/secrets/github_token", "GitHub token"),
-    openalexKey: await secret(env.GSRF_OPENALEX_API_KEY_FILE || "/run/secrets/openalex_api_key", "OpenAlex key"),
+    ...await credentials(env.PUBLISH_SECRETS_FILE || "/run/secrets/credentials"),
   };
 }
 
@@ -246,7 +259,7 @@ export async function publish(config: Config, dependencies: Dependencies = {}): 
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   if (process.argv[2] === "--help") {
-    console.log("One-shot reading publisher. Configure publisher.env and read-only GitHub/OpenAlex secret files. PUBLISH_MODE=prepare is the default; publish commits, pushes, and verifies Pages deployment.");
+    console.log("One-shot reading publisher. Configure publisher.env and the read-only secrets.env credentials file. PUBLISH_MODE=prepare is the default; publish commits, pushes, and verifies Pages deployment.");
   } else {
     let config: Config | undefined;
     try {

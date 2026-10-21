@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -8,9 +8,7 @@ const root = await mkdtemp(path.join(tmpdir(), "publisher-compose-"));
 try {
   await copyFile("NAS/static-compose.yml", path.join(root, "static-compose.yml"));
   await copyFile("NAS/publisher.env.example", path.join(root, "publisher.env"));
-  await mkdir(path.join(root, "secrets"));
-  await writeFile(path.join(root, "secrets/github-token.txt"), "fixture-github");
-  await writeFile(path.join(root, "secrets/openalex-api-key.txt"), "fixture-openalex");
+  await writeFile(path.join(root, "secrets.env"), "PUBLISH_GITHUB_TOKEN=fixture-github\nGSRF_OPENALEX_API_KEY=fixture-openalex\n");
   const value: unknown = JSON.parse(execFileSync("docker", [
     "compose", "-f", path.join(root, "static-compose.yml"), "config", "--format", "json",
   ], { encoding: "utf8" }));
@@ -23,11 +21,19 @@ try {
   assert.equal(service.ports, undefined);
   assert.equal(service.restart, "no");
   assert.deepEqual(service.cap_drop, ["ALL"]);
+  assert.deepEqual(service.cap_add, ["DAC_OVERRIDE"]);
   const serialized = JSON.stringify(service);
   assert.ok(!serialized.includes("docker.sock"));
   assert.ok(!serialized.includes("fixture-github"));
   assert.ok(!serialized.includes("fixture-openalex"));
-  assert.ok(serialized.includes("/run/secrets/github_token"));
+  assert.ok(serialized.includes("/run/secrets/credentials"));
+  assert.ok(Array.isArray(service.secrets));
+  assert.equal(service.secrets.length, 1);
+  assert.equal(service.secrets[0].source, "credentials");
+  assert.equal(path.posix.resolve("/run/secrets", service.secrets[0].target), "/run/secrets/credentials");
+  const environment = service.environment as Record<string, unknown>;
+  assert.equal(environment.PUBLISH_GITHUB_TOKEN, undefined);
+  assert.equal(environment.GSRF_OPENALEX_API_KEY, undefined);
   assert.ok(serialized.includes('"PUBLISH_MODE":"prepare"'));
   console.log("Single-container Compose configuration validated; no ports, host tools, inline credentials, or Docker socket.");
 } finally {

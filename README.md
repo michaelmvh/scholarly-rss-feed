@@ -139,11 +139,13 @@ committing, pushing, or deploying. `PUBLISH_MODE=publish` additionally pushes pu
 and verifies the matching Pages deploy job. A dedicated state mount preserves the checkout,
 article history, caches, lock, and a credential-free `last-run.json`.
 
-GitHub and OpenAlex credentials are read from separate read-only secret files. The GitHub
+GitHub and OpenAlex credentials are read from one read-only `secrets.env` file, based on
+[`NAS/secrets.env.example`](NAS/secrets.env.example). It uses ordinary `KEY=VALUE` syntax,
+but is mounted as a file rather than injected through Compose's `env_file`. The GitHub
 token is scoped to `reading-site`, with Contents read/write and Actions read permission.
 Only Git's child-process environment and GitHub API requests receive that token; the exporter
 environment receives only its OpenAlex key, and npm/validation environments receive neither.
-Mounted secret files remain within the container's shared trust boundary: use only reviewed
+The mounted credentials file remains within the container's shared trust boundary: use only reviewed
 images and publishing-repository code. Git remotes are checked before use, and tokens are not
 embedded in URLs, generated files, or the image.
 

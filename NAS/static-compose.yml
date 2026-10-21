@@ -6,24 +6,22 @@ services:
       - publisher.env
     environment:
       PUBLISH_STATE_DIR: /state
-      PUBLISH_GITHUB_TOKEN_FILE: /run/secrets/github_token
-      GSRF_OPENALEX_API_KEY_FILE: /run/secrets/openalex_api_key
+      PUBLISH_SECRETS_FILE: /run/secrets/credentials
     volumes:
       - ./state:/state
     secrets:
-      - github_token
-      - openalex_api_key
+      - credentials
     read_only: true
     tmpfs:
       - /tmp
     cap_drop:
       - ALL
+    cap_add:
+      - DAC_OVERRIDE
     security_opt:
       - no-new-privileges:true
     restart: "no"
 
 secrets:
-  github_token:
-    file: ./secrets/github-token.txt
-  openalex_api_key:
-    file: ./secrets/openalex-api-key.txt
+  credentials:
+    file: ./secrets.env

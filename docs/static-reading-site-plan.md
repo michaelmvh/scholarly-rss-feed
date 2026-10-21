@@ -230,8 +230,8 @@ untouched. Push a complete snapshot in one commit and deploy it as one Pages art
 Never upload files incrementally to the live site.
 
 Use a fine-grained GitHub token scoped to the publishing repository, with Contents read/write
-and Actions read permissions. Mount it and the OpenAlex key as separate read-only secret
-files, not image layers or Compose environment values. Bootstrap the deployment workflow
+and Actions read permissions. Read it and the OpenAlex key from one read-only `secrets.env`
+file with `KEY=VALUE` entries, not image layers or Compose environment values. Bootstrap the deployment workflow
 separately so routine data publication does not require workflow-editing privileges.
 Protect credentials, avoid logging them, and document rotation/revocation. Confirm the
 credential and branch rules actually allow the intended push/deployment flow.

@@ -47,15 +47,18 @@ Choose an expiration you can maintain and arrange a renewal reminder. No workflo
 administration, SSH key, or NAS login permission is required. The publisher does not change
 GitHub variables or DNS on your behalf.
 
-Save each credential as a separate plain UTF-8 text file, containing only the value:
+Create a single plain UTF-8 file named **secrets.env**, based on
+`NAS/secrets.env.example`, and replace both placeholders:
 
-```text
-github-token.txt
-openalex-api-key.txt
+```dotenv
+PUBLISH_GITHUB_TOKEN=YOUR_GITHUB_TOKEN
+GSRF_OPENALEX_API_KEY=YOUR_OPENALEX_KEY
 ```
 
 Do not paste either value into a PR/chat or include it in an image, Compose YAML, task
-command, or `publisher.env`. The files are mounted read-only as Compose secrets.
+command, or `publisher.env`. `secrets.env` is mounted as a read-only file and parsed by the
+publisher; do not add it to Compose's `env_file`. Comments and quoted dotenv values are
+supported. Missing keys, unrelated settings, and invalid key values stop startup.
 Read-only mounting prevents modification, not access by other code in the same container;
 use only the reviewed publisher image and publishing-repository code.
 
@@ -67,14 +70,12 @@ In **File Station**, create a separate folder under the existing `docker` shared
 /volume1/docker/reading-publisher/
     static-compose.yml
     publisher.env
-    secrets/
-        github-token.txt
-        openalex-api-key.txt
+    secrets.env
     state/
 ```
 
 Adjust `/volume1` if your Docker shared folder is on another volume. Use a separate folder
-from the existing reader. Restrict the folder and especially `secrets/` to the administrator
+from the existing reader. Restrict the folder and especially `secrets.env` to the administrator
 and Container Manager account; do not expose it through a public share.
 
 Upload `NAS/static-compose.yml` from the reviewed source revision. Copy
@@ -97,7 +98,10 @@ a shell script: do not add `export` or shell commands.
 
 The state directory holds the publishing checkout, an isolated discovery cache, npm cache,
 and staging output. The publisher clones `reading-site` itself. You do not clone it on the
-NAS manually, and you must not share the old reader's writable cache.
+NAS manually, and you must not share the old reader's writable cache. The publisher runs as
+root with only the `DAC_OVERRIDE` capability so it can read private administrator-owned
+credentials and write the mounted state directory. It is not privileged; its root filesystem
+and credentials mount remain read-only, and no other NAS directories are mounted.
 
 ## 3. Run a prepare-only container
 
@@ -234,7 +238,7 @@ before changing the checkout.
 
 After power loss, remove `state/publisher.lock` through File Station only after confirming
 no publisher container is still running. Back up published archive data and credential
-files separately. Rotate expired tokens by replacing the secret file; one-off task runs
+file separately. Rotate expired tokens by editing `secrets.env`; one-off task runs
 read the current files each time.
 
 To update the publisher, select a reviewed image tag in Compose, pull it through Container

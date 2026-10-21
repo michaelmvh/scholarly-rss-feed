@@ -11,5 +11,6 @@ playwright-report
 .env
 **/.env
 NAS/publisher.env
+NAS/secrets.env
 NAS/secrets
 NAS/state
