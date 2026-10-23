@@ -1,369 +1,442 @@
-# Static Reading Site Migration Plan
+# JSON-First Reading Site Migration Plan
 
-Status: proposed; this document does not change the running service, DNS, or NAS tasks.
+Status: revised proposal, 2026-10-20. This plan supersedes the earlier design in which the
+NAS generated and committed HTML. Updating this document does not merge implementation
+PRs, publish an image, change the NAS, or move DNS.
 
-## Goal and preferred architecture
+## Goal and decisions
 
-Keep the reader at **https://reading.michaelmvh.com**, with its own existing icons,
-individual article pages, and subscribable RSS feeds. Move public serving from the NAS to
-GitHub Pages while retaining the NAS for scheduled discovery and generation.
+Keep **https://reading.michaelmvh.com**, the reader's distinct icons, individual article
+pages, and RSS, while separating publication collection from website presentation.
+
+- The Rust application on the NAS produces **structured JSON only** for the new reader.
+- `reading-site` owns reader UX, TypeScript rendering/build code, styles, icons, and RSS
+  generation. GitHub Actions builds the finished website from its source and the JSON.
+- Keep the JSON in `reading-site/data/` initially. There are four logical components but
+  only three repositories; a fourth data-only repository is not part of the initial plan.
+- GitHub Pages serves the finished static site. Browsing never requires a NAS connection.
+- Use one self-contained, scheduled publisher container, not host-installed publishing
+  tools. SSH, host Git/Node/rsync/GitHub CLI, and a Docker socket mount are unnecessary.
+- Keep ordinary settings in `publisher.env` and the two credentials in one read-only
+  `secrets.env` file. Do not inject that credentials file through Compose's `env_file`.
+- Strict backward compatibility is not required. Old subscriptions and bookmarks may
+  need replacement; do not build legacy redirects or historical URL translation.
+- Keep Cloudflare as the existing DNS provider for convenience, with a DNS-only reader
+  record. Cloudflare hosting, proxying, Workers, and a tunnel are not required.
+
+## Component ownership
+
+| Component | Repository/location | Responsibility |
+| --- | --- | --- |
+| Main website | `michaelmvh/michaelmvh.github.io` | Portfolio and other main-site content; optionally link to the reader |
+| Reader application | `michaelmvh/reading-site` | Reader UX, templates, styles, browser behavior, icons, static HTML/RSS build, and Pages deployment |
+| Article data | `reading-site/data/` | Generated public metadata, feed membership, retained article identities, and collection freshness |
+| Collector and publisher | `michaelmvh/scholarly-rss-feed`, running on the NAS | Fetch, enrich, deduplicate, retain, validate, and publish JSON snapshots |
+
+The main website and reader do not share a build or deployment. Matching visual design
+would be an explicit choice, not something inherited from using the same domain.
+
+The Rust repository remains the source of discovery configuration, such as which authors,
+journals, and categories to collect. It must not own the new website's markup or styling.
+Reuse its existing provider integrations, identity matching, provenance, and caches rather
+than rewriting those in TypeScript.
+
+Reader source and generated data occupy different directories in `reading-site`. A
+representative layout is:
 
 ```text
-scholarly-rss-feed source repository
-    -> GitHub Actions publishes the application image to GHCR
-    -> NAS runs the image on a schedule with persistent discovery caches
-    -> application exports a validated static site
-    -> NAS pushes changed output to a separate publishing repository
-    -> that repository's GitHub Actions deploys a Pages artifact
-    -> reading.michaelmvh.com serves the last successful deployment
+reading-site/
+    src/                 # Reader templates, styles, browser code, and assets
+    scripts/             # Data validation, static generation, and output checks
+    schema/              # Versioned public JSON contract
+    data/                # NAS-generated JSON; never hand-edited as UI source
+    test/                # Contract, rendering, and browser fixtures
+    .github/workflows/   # Reader build, deployment, and independent monitoring
+    dist/                # Generated HTML/RSS/assets; ignored by Git
 ```
 
-The NAS no longer needs to be reachable by readers. A NAS outage delays new publications
-but does not take down previously published pages or RSS. Freshness changes from
-request-driven generation to scheduled updates plus deployment time.
+Only `data/` is updated by the scheduled NAS publisher. Generated HTML, XML, CSS bundles,
+and browser bundles are deployed as an artifact, not committed by the NAS.
 
-The scheduled job uses a self-contained publisher image with the existing Rust exporter,
-Node.js validation, Git, and GitHub REST polling. DSM launches the container; no host Git,
-Node, rsync, GitHub CLI, SSH service, or Docker socket mount is required. The first run uses
-prepare-only mode before publication is explicitly enabled.
+### Why not a fourth repository initially?
 
-Use a separate publishing repository, provisionally named `reading-site`. Keep the Rust
-application, templates, browser code, icons, feed configuration, and exporter tests in
-`scholarly-rss-feed`. The publishing repository contains generated public output and a small
-deployment workflow; it is not a second implementation of the reader. The portfolio
-repository does not need to change.
+Keeping data alongside reader source gives one straightforward workflow: pushes affecting
+either data or UX can build the site from a single checked-out revision. There is no
+cross-repository dispatch credential or polling mechanism to coordinate.
 
-### Migration assumption: no strict backward compatibility
+This is a logical boundary, not a strong permission boundary. A GitHub token with Contents
+write permission applies to the repository, not just `data/`. The publisher must stage
+only the allowlisted data paths, but that safeguard does not make its token path-scoped.
 
-Treat this as a clean cutover to the static site's URL and data contracts. Existing RSS
-subscriptions and bookmarks may need updating; preserving every legacy URL, query parameter,
-or item identifier is not an acceptance requirement. Use GitHub Pages directly, with no
-Cloudflare redirect layer, browser compatibility shim, or historical article-alias backfill.
-Cloudflare can remain the DNS provider.
+If independent data history, multiple consumers, or stronger credential isolation becomes
+important, move JSON to a dedicated data repository. Its NAS credential could then have
+no write access to reader code. That alternative requires an explicit reader-build trigger
+or polling arrangement and reproducible checkout of the selected data revision.
 
-Preserve the reader's useful behavior and visual identity, not the old server's routing
-contract. Keep newly published article URLs and RSS identities stable across routine static
-updates; relaxing migration compatibility is not a reason to churn them on every export.
+## Communication and build flow
 
-## Requirements to preserve
+```text
+OpenAlex / bioRxiv / arXiv / curated collections
+                        |
+                        v
+NAS publisher container
+    Rust: fetch -> enrich -> deduplicate -> export JSON
+    Publisher: validate contract -> commit only data/ -> push
+                        |
+                        v
+reading-site repository: reader source + data/
+                        |
+                        v
+GitHub Actions: validate JSON -> build HTML and RSS -> validate output
+                        |
+                        v
+GitHub Pages: reading.michaelmvh.com
+                        ^
+                        |
+              Browsers and RSS clients
+```
 
-| Requirement | Planned behavior | Main challenge |
-| --- | --- | --- |
-| Separate subdomain | Continue using `reading.michaelmvh.com` over HTTPS | DNS, Pages domain registration, certificate provisioning, and rollback must be coordinated |
-| Unique icons | Keep the existing SVG favicon and 180x180 PNG Apple touch icon | Safari and Home Screen bookmarks may retain cached icons |
-| RSS | Publish real XML files with stable item identities and absolute links | Update subscriptions from `?rss` URLs to the new XML paths |
-| Individual article pages | Pre-render one readable HTML page per article, with stable paths | Keep static-site identities stable as metadata is enriched; old NAS URLs need not resolve |
-| Reader filters | Filter exported records without contacting the NAS | Current controls submit to a server; browser filtering needs implementation |
-| Optional sources | Collect supported categories in scheduled jobs, but leave them unselected by default | Selecting a source can no longer initiate discovery on demand |
-| Optional authors | Preserve default, custom, empty, and all-author selection semantics | Reader defaults must not silently remove optional authors from RSS |
-| Availability | Serve the last successful complete deployment during refresh failures | Monitor data freshness separately from website uptime |
+There is no runtime API between the NAS and the public reader. JSON snapshots are their
+communication contract. The browser does not contact provider APIs or the NAS.
 
-Essential listings, navigation, abstracts, and RSS links remain usable without JavaScript.
-Interactive filtering can be progressive enhancement; a no-JavaScript page should expose
-named feeds/presets and explain that custom filtering requires JavaScript, not submit a
-form that appears to work but does nothing.
+There are two independent update paths:
 
-## Existing implementation to reuse
-
-- `src/main.rs`: feed resolution, provider orchestration, `build_feed`, and RSS conversion.
-- `src/works.rs` and `src/provenance.rs`: identity matching, deduplication, and source provenance.
-- `src/snapshot_store.rs`, `src/curated.rs`, and `src/discovery/`: persistent source snapshots
-  and incremental discovery.
-- `src/reader/`: reader models, filtering semantics, HTML escaping, and article rendering.
-- `src/assets/`: reader styling, browser behavior, and reader-specific icon assets.
-- `feeds.toml`: named feed definitions and author defaults.
-- `NAS/docker-compose.yml` and the README deployment instructions: current NAS operation.
-
-Add a run-once export mode to the current application rather than scraping its HTTP output
-or rebuilding the discovery pipeline in another language. Extract shared generation and
-rendering code only as needed so the HTTP mode and exporter use the same rules.
-
-The current reader script submits forms; it does not implement standalone dataset filtering.
-The current server also generates articles and source-specific feeds on demand. Copying
-today's HTML to Pages is therefore insufficient.
-
-## Published output and URL contract
-
-Proposed paths, all under `https://reading.michaelmvh.com`:
-
-| Path | Purpose |
+| Change | Required work |
 | --- | --- |
-| `/` | Default reader, currently the `bioml` feed |
-| `/feed.xml` | Stable default RSS subscription |
-| `/feeds/<feed-name>/` | Reader for a configured named feed |
-| `/feeds/<feed-name>/feed.xml` | RSS for that named feed |
-| `/article/<stable-id>/` | Full static article preview |
-| `/data/<feed-name>.json` | Versioned public metadata needed by reader filters |
-| `/favicon.svg` | Existing reader SVG icon |
-| `/apple-touch-icon.png` | Existing reader Home Screen icon |
-| `/reader.css`, `/reader.js` | Shared first-party reader assets |
-| `/status.json` | Public-safe data freshness and generation metadata |
-| `/404.html` | Clear missing-page response with navigation to the reader |
+| New publication data | NAS commits JSON; reader Actions rebuilds and deploys |
+| Reader layout, styling, or browser behavior | Push reader source; rebuild using the existing JSON, without contacting the NAS or providers |
+| Collection logic or discovery configuration | Build/pull a reviewed collector image, then run collection |
+| Main portfolio content | Existing main-site workflow only |
 
-Write directory indexes for reader and article paths so direct navigation and browser
-refresh work without an SPA fallback. Choose a simple static-site identifier format without
-requiring the current hex encoding or old slashless paths. Support a configurable base path
-for a pre-cutover project-site preview; production stays at the subdomain root.
+UI-only updates must remain possible while the NAS is offline. GitHub Pages continues
+serving the last successful deployment when collection or a subsequent reader build fails.
 
-Keep identifiers independent of titles, rendering order, and generation timestamps. Persist
-the identities assigned to published static records so enrichment does not change their URLs
-or RSS GUIDs on each run. Reuse existing identifiers where convenient, but do not reconstruct
-old NAS links or build a migration alias registry.
+## Versioned JSON contract
 
-Feed retention and article-page retention are different: papers can leave the rolling feed
-without deleting their published article pages. Persist the article registry and retained
-metadata on the NAS, back them up, and support restoring published records from the publishing
-repository after disk loss. Do not retain only old HTML that can never receive template fixes.
-Track archive growth and establish a retention review before approaching hosting limits.
+Keep one authoritative, versioned public schema in the reader repository. The collector
+declares the schema version it emits; collector fixtures and integration checks must prove
+that the reader accepts that output. The publisher validates against the supported contract
+before committing, and the reader build validates again before rendering.
 
-Expose only public article metadata and appropriately reusable abstracts, provenance, and
-publisher/PDF links. Do not mirror full papers, provider responses, upstream collection
-Markdown, private caches, contact configuration, or credentials. Preserve attribution and
-review source terms for static redistribution. Escape external text in both HTML and XML.
+The contract must describe at least:
 
-## Reader and source behavior
+| Data | Purpose |
+| --- | --- |
+| Schema version and snapshot identity | Detect incompatible or mixed snapshots |
+| Stable article IDs and publication/version identifiers | Retain identity through enrichment and produce stable URLs/RSS GUIDs |
+| Titles, authors, venues, permitted abstracts, and original/PDF links | Provider-neutral content for both HTML and RSS |
+| Publication dates and their precision | Avoid misrepresenting partial dates |
+| Collection-added dates and provenance | Keep collection discovery separate from publication dates |
+| Discovery sources and categories | Preserve all sources after deduplication |
+| Named feeds, membership, tracked-author associations, and defaults | Preserve configured reader and RSS behavior without browser-side provider matching |
+| Snapshot generation and successful source-check times | Measure collection freshness independently from website deployment |
 
-Generate complete HTML for the default view of each named feed. Export enough normalized
-metadata for browser filtering, preserving the current date precision, collection-added
-dates, tracked-author identity, optional status, and discovery provenance.
+Prefer canonical article records referenced by feed membership, rather than inconsistent
+copies of the same publication. Preserve feed-specific tracked-author associations
+separately from shared publication metadata.
 
-Preserve the current author rules: default selection hides optional-only tracked-author
-papers, all-author mode includes untracked papers, and an explicitly empty custom selection
-shows no papers. Preserve selection state in URLs, including navigation to and from articles.
-Use a clean static-reader query format rather than reproducing legacy server form fields.
-Do not introduce browser-local preferences that override a shared URL.
+JSON must not contain HTML templates, CSS classes, secrets, private provider cache dumps,
+or NAS filesystem paths. Treat imported metadata as untrusted: validate identifiers,
+dates, and URLs, and escape text when rendering HTML or XML.
 
-Collect the configured core/curated sources and supported optional native categories before
-publication, using bounded windows and existing incremental caches. Do not expand to
-unbounded arXiv categories or backfill all history on every run. Export per-source membership
-through deduplication so source selection remains meaningful for papers discovered more
-than once. Prefer one canonical merged record with source-membership filtering; it need not
-reproduce the old server's selection-dependent representative metadata. Test that selecting
-a source shows the correct papers and preserves their provenance.
+Settle the exact file layout and any sharding after measuring a full export. Use deterministic
+ordering and stable serialization so routine collection does not rewrite unrelated records.
+Keep files within GitHub's per-file limits; do not put an indefinitely growing archive into
+one file without a size gate. Commit all files in a snapshot together, and reject incomplete
+snapshots or broken feed references.
 
-Start with the existing supported category set, subject to measured export size and run
-time. If it cannot fit the agreed budgets, narrow the set explicitly before cutover rather
-than silently dropping an advertised source. Load optional/archive datasets only when needed
-if a single payload becomes too large.
+### Retained articles and freshness
 
-Arbitrary author, journal, ORCID, topic, or date-window queries are not part of the initial
-static service. Adding a discovery input requires a configuration change and a scheduled
-export. Browser filters operate only on the exported data.
+Feed retention and article retention are different. A paper leaving the recent feed should
+not automatically remove its stored metadata or generated article page. Preserve the
+published identity registry in retained data, back it up, and support recovery from the
+committed JSON after NAS disk loss.
 
-## RSS and clean subscription cutover
+The reader must be able to regenerate retained article pages from JSON alone. Do not rely
+on keeping old HTML around, and do not backfill aliases for obsolete NAS URLs.
 
-RSS itself is straightforward on static hosting: generate valid XML and link to the same
-canonical feed files from reader buttons and HTML RSS autodiscovery tags.
+Distinguish **data collection time** from **site build/deployment time**. A UI-only rebuild
+must leave the data timestamp unchanged. The displayed freshness indicator and staleness
+monitor must use the NAS data timestamp, not the latest Actions deployment time.
 
-- Use stable item GUIDs with correct permalink semantics across static exports. Preserving
-  old NAS GUIDs is optional; clients may treat papers as new when subscribing to the replacement
-  feed. Keep publication dates distinct from collection-added dates.
-- Preserve the current default RSS content, including optional authors. Reader-only date and
-  author filters must not become RSS filters.
-- Generate each named feed and a bounded set of explicitly configured source presets.
-  Do not export every possible combination of source checkboxes.
-- When a browser source selection has no matching published RSS preset, label the available
-  subscription accurately instead of claiming it matches the current selection.
-- Use absolute public URLs in RSS, a suitable XML content type, and an update/TTL policy
-  consistent with the export cadence. Validate the actual hosted response with TRMNL and
-  a general RSS reader.
-- Check any required CORS behavior against the hosted XML. Pages does not provide arbitrary
-  per-file response-header configuration; use same-origin data for the reader itself.
+Publish metadata, appropriately reusable abstracts, attribution, and links. Do not mirror
+PDFs, full papers, or upstream collection Markdown. Review source redistribution terms.
 
-### Replacing existing URLs
+## Reader presentation and RSS ownership
 
-Today, `/?rss` and `/?feed=protein-design-archive&rss` return XML. Pages serves the same
-root HTML file regardless of those query parameters. These old subscription URLs will no
-longer work as RSS, and no compatibility layer is planned.
+The reader repository uses strict TypeScript for its build and browser code, with runtime
+validation at the JSON boundary. Preserve the current lightweight, framework-free reader
+unless a later UX requirement justifies a framework.
 
-Update TRMNL and other actively used subscriptions to `/feed.xml` or the appropriate
-`/feeds/<feed-name>/feed.xml` once the new endpoints are live. Replace rather than keep both
-subscriptions where duplicate imports would be inconvenient. Document the new paths and
-provide clearly labeled subscription links in the reader.
+Reuse the warm off-white background, serif headings, green accents, responsive reading
+column, author highlighting, SVG favicon, and Apple touch icon. This migration is not
+a portfolio redesign.
 
-Old `?feed=...` bookmarks, custom discovery queries, and article paths are likewise not
-guaranteed to work. Provide normal named-feed navigation and a helpful static 404 page;
-do not add legacy query translation or historical redirect generation.
+GitHub Actions pre-renders complete listings and individual article pages. Essential
+content, navigation, abstracts, and subscription links work without JavaScript. Browser
+JavaScript enhances date/author/source filtering and navigation over already-collected
+records. It may use embedded metadata or same-origin static JSON according to measured
+payload needs; it must not require a live API.
 
-## Subdomain, HTTPS, and icons
+Preserve default, all, custom, and explicitly empty author selections. Optional authors
+remain available and remain in the complete RSS feed. Preserve selection state in URLs,
+including article navigation and back/forward behavior.
 
-Register and verify `reading.michaelmvh.com` for the new publishing repository's Pages site
-before directing DNS to it. Its custom domain is separate from the portfolio's apex and
-`www` configuration. Leave the portfolio and mail records unchanged.
+Only advertise sources and categories that collection has actually included. Additional
+coverage is a collector configuration change, not something a browser checkbox fetches.
+Keep native-source windows bounded and avoid unfiltered category expansion or repeated
+full-history downloads. Source membership survives deduplication and supports OR selection.
 
-The eventual DNS target for `reading` is `michaelmvh.github.io`, not a repository path and
-not the NAS tunnel target. With an Actions-based Pages deployment, the custom domain is
-configured in repository settings; a generated `CNAME` file is not a substitute.
+The reader build generates **both HTML and RSS from the same validated JSON snapshot**:
 
-Use a DNS-only CNAME and enable HTTPS once GitHub provisions the certificate.
-Allow for DNS propagation and certificate delays; do not promise a zero-downtime flip.
-Remove this hostname's dependency on the Cloudflare Tunnel/proxy during cutover. Validate
-the Pages certificate and actual HTML/XML responses; do not disable TLS verification as
-a workaround.
+- Publish each named feed and a bounded set of explicitly configured source presets.
+- Use stable item GUIDs and absolute links. Keep publication dates distinct from
+  collection-added dates.
+- Do not turn browser-only author/date filters into RSS filters. Label available RSS
+  subscriptions accurately when a browser selection has no equivalent published preset.
+- Include RSS autodiscovery tags and use real XML file URLs.
+- Validate actual hosted RSS behavior with TRMNL and another RSS client before cutover.
 
-Keep `/favicon.svg` and `/apple-touch-icon.png` on the reading subdomain and include their
-existing link tags on every reader and article page. Reuse the actual reader assets rather
-than the portfolio's icons. No service worker or PWA rewrite is required. Test Safari,
-desktop browser tabs, and an iOS Home Screen bookmark; icon caches may require recreating a
-bookmark if artwork or URLs change. Keeping the same host and icon paths minimizes churn.
+The public site URL and deployment base path belong to the reader build, not the NAS
+exporter or article metadata. The same snapshot must support a project-path preview and
+the final subdomain without collecting or publishing the data again.
 
-## Scheduling, publication, and failure handling
+The new static publishing path does not ask Rust to render reader HTML or RSS. The existing
+Rust HTTP server may retain those features temporarily as the current service and rollback
+path; it is not the source of truth for the new reader's presentation.
 
-Propose one daily NAS export initially, with manual refresh available. Keep this separate
-from the existing weekly **Update Scholar RSS** Task Scheduler job, which updates containers
-rather than generating a scheduled public snapshot.
+## Independent hosting and Cloudflare's role
 
-The export task must use a persistent cache volume, a run lock, bounded upstream requests,
-explicit exit codes, and logs. Track the application image/version used. Publish only after
-all required feeds and assets pass validation.
+| Public address | Pages repository | Purpose |
+| --- | --- | --- |
+| `https://michaelmvh.com` | `michaelmvh.github.io` | Existing main website |
+| `https://reading.michaelmvh.com` | `reading-site` | Independent reader, article pages, assets, and RSS |
 
-Required discovery failures abort publication unless an explicitly approved policy permits
-a last-known-good source snapshot with visible source freshness. Optional enrichment may
-remain best-effort only when usable base records survive and the failure is reported.
-Do not publish a successful-looking empty or unexpectedly truncated feed after an outage.
-Establish coverage checks and record-count review thresholds from the initial baseline,
-with an explicit override for intentional configuration changes.
+GitHub supports a user site plus project sites in separate repositories, with a custom
+subdomain assigned to an individual project. No iframe, reverse proxy, shared deployment,
+or NAS web server is needed to join these sites. The portfolio can simply link to the reader.
 
-Generate into a fresh staging directory. The publishing task copies only an allowlisted
-output directory into the publishing checkout, leaving its workflow and repository metadata
-untouched. Push a complete snapshot in one commit and deploy it as one Pages artifact.
-Never upload files incrementally to the live site.
+Before assigning the reader's custom domain, preview the project site at
+`https://michaelmvh.com/reading-site/`, inherited from the existing user site's domain.
+The reader builder must support that base path and the final subdomain root. Once a custom
+domain is assigned, it becomes canonical; do not assume the preview address remains an
+independent site.
 
-Use a fine-grained GitHub token scoped to the publishing repository, with Contents read/write
-and Actions read permissions. Read it and the OpenAlex key from one read-only `secrets.env`
-file with `KEY=VALUE` entries, not image layers or Compose environment values. Bootstrap the deployment workflow
-separately so routine data publication does not require workflow-editing privileges.
-Protect credentials, avoid logging them, and document rotation/revocation. Confirm the
-credential and branch rules actually allow the intended push/deployment flow.
+Cloudflare's roles are distinct:
 
-Use deterministic ordering and content-aware timestamps to avoid rewriting every article or
-RSS item daily. Push only public content or freshness changes. It is acceptable for a small
-freshness manifest to change after a successful no-new-paper refresh; do not rewrite all
-pages just to record that check.
+| Service | Role after migration |
+| --- | --- |
+| DNS | Keep Cloudflare as the current DNS provider; another provider could perform the same function |
+| HTTP proxy/CDN | Not required; use DNS-only routing for the reader |
+| Tunnel | Not required for the new reader; retire this reader's tunnel only after successful cutover |
+| Cloudflare Pages/Workers | Not part of this design |
 
-The deployment workflow validates only the generated output, uploads that directory using
-the supported Pages artifact action, and deploys through the `github-pages` environment with
-minimal permissions. Serialize publication/deployment so an older snapshot cannot replace
-a newer one. Confirm a successful push is followed by a successful deployment; they are
-separate failure points.
+DNS-only means Cloudflare answers DNS queries but does not proxy the website's HTTP/HTTPS
+traffic. GitHub Pages hosts the reader and provides its HTTPS certificate.
 
-Show last successful source refresh times separately from site generation/deployment time.
-Alert on failed export, failed push, failed deployment, and excessive staleness. A proposed
-initial stale threshold is 48 hours for daily collection. Notifications should use an
-explicitly configured operator channel rather than silently relying on task logs.
+Register and verify the reader custom domain in `reading-site` Pages settings before
+changing its DNS record:
 
-## Size, maintenance, and hosting limits
+```text
+Type:   CNAME
+Name:   reading
+Target: michaelmvh.github.io
+Proxy:  DNS only
+```
 
-Metadata and HTML should be much smaller than mirroring PDFs, but optional source datasets,
-retained article pages, and Git history will grow. Measure initial output bytes, file counts,
-mobile filter performance, daily changed bytes, and expected annual growth before rollout.
+The target excludes the repository name. GitHub selects the deployment using the requested
+hostname and the repository's custom-domain setting. An Actions deployment does not rely
+on a generated `CNAME` file to configure the domain.
 
-GitHub currently documents a 1 GB published-site limit, a recommended 1 GB source repository
-limit, a soft 100 GB/month bandwidth limit, and a 10-minute Pages deployment timeout.
-Custom Actions deployments avoid the standard soft build-frequency limit, but not the site
-size limit. Keep substantial headroom; review limits again during implementation.
+Leave apex, `www`, mail records, and unrelated tunnels alone. Allow for DNS propagation and
+certificate provisioning; do not promise a zero-downtime flip. Changing DNS providers is
+outside this migration and is unnecessary.
 
-Do not rewrite publishing-repository history automatically to manage growth. If measurements
-make committed generated output impractical, separately evaluate publishing a Pages artifact
-without retaining every generated revision in Git, or using another static host.
+### Public URL contract and clean cutover
 
-Public hosting remains public even if a paid plan permits a private source repository.
-Choose repository visibility and confirm account eligibility before creation; assume no
-private reading data can be stored in the published output.
+| Path on the reading subdomain | Output |
+| --- | --- |
+| `/` | Default reader |
+| `/feed.xml` | Default RSS feed |
+| `/feeds/<feed-name>/` | Named reader |
+| `/feeds/<feed-name>/feed.xml` | Named RSS feed |
+| `/article/<stable-id>/` | Individual article preview |
+| `/favicon.svg`, `/apple-touch-icon.png` | Reader-specific icons |
+| `/status.json` | Public-safe data freshness and separate build information |
+| `/404.html` | Helpful missing-page response |
+
+Write directory indexes so deep links and reloads work without an SPA fallback. Copy only
+the static JSON needed by the browser/status endpoint into the deployed artifact; do not
+force the entire retained archive into every initial page load.
+
+Old `?rss`, `?feed=...`, arbitrary discovery queries, and historical article paths are not
+compatibility requirements. Update subscriptions and bookmarks explicitly. A one-time
+RSS reimport is acceptable; identity churn on later routine updates is not.
+
+## NAS container and publication safety
+
+Keep the self-contained, one-shot publisher image. Rust handles collection and JSON export;
+Node may remain for orchestration and JSON contract validation, and Git transports data.
+HTML/RSS building moves to GitHub Actions, not to another process on the NAS.
+
+DSM File Station, Container Manager, and Task Scheduler are sufficient. No SSH service or
+host publishing-tool installation is required. Mount isolated persistent state and
+credentials; expose no ports and mount no Docker socket.
+
+Use these configuration boundaries:
+
+```text
+publisher.env   # Repository, collection/publishing mode, contact, and commit identity
+secrets.env     # PUBLISH_GITHUB_TOKEN and GSRF_OPENALEX_API_KEY
+state/          # Private caches, checkout, staging, retained state, and run summaries
+```
+
+Read `secrets.env` as a read-only file containing `KEY=VALUE` entries, not as a Compose
+`env_file`. Keep it private and excluded from Git and image build contexts. The GitHub
+fine-grained token needs Contents read/write and Actions read on `reading-site`; it does
+not need workflow-editing permission. Mounted credentials remain within the container's
+trust boundary, so use only reviewed code.
+
+A verified OpenAlex key is required for cursor paging beyond the first page. Never ask
+the user to put its value in a PR, chat, or public configuration. Do not infer missing
+credentials or silently truncate an anonymous export.
+
+Start in prepare-only mode: export and validate JSON locally without commits or pushes.
+Publish mode may update **only `data/`**, never reader source, workflows, `site/`, or `dist/`.
+Use a fresh staging directory and one commit per complete snapshot. Preserve dirty or
+unpushed work for inspection instead of resetting it.
+
+Reconcile concurrent reader-source changes before pushing and revalidate against the
+applicable schema. Fail explicitly on conflicts or incompatible contracts; never force-push
+or overwrite UI changes. The publisher must distinguish a successful push from a successful
+reader build/deployment and report failed or skipped deployment clearly.
+
+## Scheduling, failures, and operational limits
+
+Propose daily collection, with a manual run available. Keep it separate from the existing
+weekly **Update Scholar RSS** image-update task. UI updates should need no NAS image update.
+
+Use a run lock, bounded requests, explicit exit codes, and logs. Required discovery-refresh
+failures abort data publication; incremental caches and successful conditional requests
+remain useful. Optional enrichment can fail only with an explicit report and usable base
+records. Reject empty/truncated required feeds and unexpected large coverage drops.
+
+The reader workflow triggers for relevant source and data changes and supports manual runs.
+It validates JSON, builds from one checked-out revision, checks generated HTML/RSS/assets,
+and deploys only `dist/` as a Pages artifact. Serialize deployments so older snapshots cannot
+replace newer ones. The build needs no NAS credentials or provider API keys.
+
+Alert on collection, push, build, and deployment failures. Retain independent GitHub-hosted
+monitoring, initially with a 48-hour data-staleness threshold. UI-only deployments must not
+reset that timer. Configure and verify an operator notification channel.
+
+Measure full-snapshot size, file counts, Git growth, build time, and mobile loading/filtering
+performance before rollout. Preserve substantial headroom under GitHub's repository,
+per-file, bandwidth, and Pages limits; the documented published-site limit is 1 GB. Retain
+a conservative deployment size gate and set data-file/sharding thresholds from measurements.
+Do not automatically rewrite Git history to control growth.
+
+## Reconcile the existing draft PRs before deployment
+
+The existing drafts were largely built around NAS-generated HTML. Their passing checks do
+not establish that this revised architecture is implemented. They must be refactored and
+their operator documentation reconciled before being treated as deployment instructions.
+
+| Draft | Required disposition |
+| --- | --- |
+| `scholarly-rss-feed` #2: static export | Reuse collection, identities, and retention; change the new publishing output to JSON only |
+| `scholarly-rss-feed` #3: static reader | Move reader UX/rendering ownership to `reading-site`; port browser behavior and its tests |
+| `scholarly-rss-feed` #4: host orchestration | Superseded by the container-only approach; do not install host tools |
+| `scholarly-rss-feed` #5: freshness policy | Retain required-refresh behavior for data publication |
+| `scholarly-rss-feed` #6: OpenAlex authentication | Retain private key handling and pagination support |
+| `scholarly-rss-feed` #7: publisher container | Retain container/credential design; publish only `data/` and remove reader URL/build configuration from NAS export |
+| `reading-site` #1: publishing infrastructure | Add reader source and a JSON-to-HTML/RSS build; replace prebuilt-`site/` deployment with a generated `dist/` artifact |
+| `reading-site` #2: monitoring | Monitor the NAS data timestamp independently of reader build/deployment time |
+
+Do not merge the old implementation stack as though it already satisfies this plan. Preserve
+useful work, but review the resulting dependency order and contract integration again.
 
 ## Implementation phases and acceptance gates
 
-### Phase 1: Baseline and explicit decisions
+### Phase 1: Contract and baseline
 
-Identify actively used RSS subscriptions to update, current icon assets, feed sizes, source
-freshness, and default/filter behavior. Capture representative fixtures, including
-optional-author and merged-version cases. Confirm publishing repository visibility, useful
-RSS presets, category coverage, refresh cadence, and retention budget.
+Define component ownership, schema/version handling, retained identities, feed membership,
+date semantics, and source freshness. Capture representative real-data fixtures and measure
+initial volume. Agree on file layout, useful RSS presets, and collected source coverage.
 
-Acceptance: new URLs and intentionally unsupported behaviors are documented. A clean cutover
-is the agreed baseline; there is no legacy compatibility matrix or redirect workstream.
+Acceptance: a representative JSON snapshot is sufficient to build listings, article pages,
+and RSS without a provider/NAS call or embedded HTML.
 
-### Phase 2: Run-once export and durable identities
+### Phase 2: Rust JSON producer
 
-Add the exporter, shared rendering support, static URL generation, published article registry,
-public-data schema, source freshness manifest, and complete-output validation. Preserve the
-HTTP service as the production and rollback path.
+Refactor export mode around the public data contract. Preserve provider integrations,
+deduplication, author matching, refresh policy, and persistent state. Keep the old HTTP
+service independently available during migration.
 
-Acceptance: fixture exports are deterministic aside from intentional freshness metadata;
-XML parses; required files and links exist; static-site identities remain stable across
-successive exports; an upstream failure cannot replace good output with missing feeds.
-Rebuilding from retained metadata recreates static article pages after they leave active
-feed windows.
+Acceptance: deterministic JSON, stable identities, retained articles, explicit source
+failures, and no private fields or presentation markup in the exported contract.
 
-### Phase 3: Static reader and RSS behavior
+### Phase 3: Reader-owned static build
 
-Implement browser filtering and URL state, named feeds, source presets, icon references,
-article navigation, and RSS autodiscovery. Keep discovery logic out of the browser.
+Move reader presentation into `reading-site`. Implement runtime validation, TypeScript
+rendering, responsive styles, icons, browser filters, RSS generation, and artifact deployment.
 
-Acceptance: default/custom/all/empty author cases, optional authors in RSS, source OR
-selection, date semantics, merged provenance, direct article navigation, and back navigation
-match the agreed behavior. Essential content works without JavaScript; keyboard controls
-and responsive layouts remain usable. Filtering and page loads make no NAS/provider requests.
+Acceptance: JSON fixtures produce valid HTML/XML; essential content works without JavaScript;
+author/source/date behavior and deep links match the agreed semantics. A UI-only change
+deploys successfully while the NAS is offline and leaves the data timestamp unchanged.
 
-### Phase 4: Publishing repository and NAS rehearsal
+### Phase 4: Container and preview integration
 
-After approval, create the publishing repository, configure Pages Actions and credentials,
-and add the independent NAS export task. Rehearse several update cycles on a preview URL
-without changing production DNS.
+Adapt the container publisher to commit only `data/`. Rehearse prepare-only and publishing
+modes, credentials, first-run recovery, overlapping runs, incompatible schemas, source
+failures, concurrent UI changes, and failed builds/deployments. Deploy at the project-site
+preview address without changing the production reader's DNS.
 
-Acceptance: no-change, new-paper, enrichment, source failure, concurrent-run, push failure,
-and deployment failure cases behave as designed. Inspect emitted HTML/XML/JSON for private
-data. Confirm that stopping the NAS leaves the preview reader and RSS available.
+Acceptance: only generated JSON changes in the publishing commit; Actions creates the site;
+the preview works without NAS access. Complete full-feed collection with a privately
+configured OpenAlex key before declaring the production dataset ready.
 
-### Phase 5: Domain and subscription cutover
+### Phase 5: Domain and subscriptions
 
-Register the custom domain and record the old DNS/tunnel settings. Switch only the reading
-hostname to the DNS-only Pages target, complete HTTPS checks, and verify the production
-reader, new article deep links, feed responses, icons, and freshness display. Update actively
-used RSS clients and bookmarks to the new URLs.
+Register the custom domain, publish output for the subdomain root, change only the reading
+DNS record, verify HTTPS, and update subscriptions/bookmarks and monitoring URLs.
 
-Acceptance: TRMNL and a general RSS client fetch actual XML at the new paths; repeat exports
-do not create duplicate-item floods. A one-time reimport during migration is acceptable.
-New article and icon URLs work on the custom domain; the portfolio and mail configuration
-remain unchanged. Legacy URL behavior is not a cutover gate.
+Acceptance: final-hostname listings, articles, icons, and RSS work; TRMNL fetches XML; the
+portfolio and mail configuration remain unchanged. No legacy compatibility layer is needed.
 
-### Phase 6: Observation and retirement
+### Phase 6: Observe and retire old serving
 
-Observe at least one week of scheduled publication and failure notifications. Keep the
-previous NAS service, configuration, and required caches available during this window.
-Only then retire this service's public tunnel and continuous web-server container, and
-update deployment documentation and the weekly image-update procedure for run-once use.
+Observe at least one week of scheduled data updates and useful failure notifications.
+Keep the old NAS service, image, configuration, and caches available during this interval.
+Then retire only this reader's public-serving container/tunnel and revise image-update tasks.
 
-Acceptance: public reads require no NAS access, publication and staleness monitoring work,
-and the last-good static deployment remains usable during a controlled NAS outage.
+Acceptance: public reads require no NAS connectivity, independent staleness monitoring works,
+and UI and data updates can proceed independently.
 
-## Rollback
+## Rollback and remaining decisions
 
-Before cutover, retain the previous application image reference, Compose/environment files,
-DNS/tunnel mapping, and known-working RSS URLs. Do not delete persistent discovery caches.
+For bad data, restore a known-good JSON revision and rebuild. For a reader regression, restore
+reader source without discarding newer valid data, provided the schema remains compatible.
+Retain artifact/data revision identifiers so rollback uses a compatible pair.
 
-For bad generated content, redeploy a known-good publishing revision. For cutover problems,
-restore the reading hostname's previous tunnel mapping and proxy setting; DNS caches may
-delay recovery. If reverting to the NAS service, manually restore the old RSS subscription
-URLs in actively used clients. Temporary interruption and bookmark/subscription changes are
-acceptable; do not add static-path compatibility routes to the fallback service. Prefer
-redeploying a known-good static revision when possible to avoid another URL transition.
+For domain-cutover problems, restore the old tunnel/DNS mapping and manually restore old
+RSS URLs in active clients. Temporary interruption and URL changes are acceptable; do not
+add compatibility routes to the old service just for rollback. Keep private caches intact.
 
-## Decisions required before implementation
-
-- Final publishing repository name, visibility, and publishing credential mechanism.
-- Which source-specific RSS presets are useful in the new service.
-- Optional-source coverage, daily schedule, notification channel, and stale-data policy.
-- Article retention/growth budget and backup/restore procedure.
-
-These decisions do not block reviewing this plan. Creating the publishing repository,
-changing DNS, adding NAS jobs, and migrating subscriptions require separate implementation
-approval.
+Decisions still needed during implementation are the final JSON layout/schema details,
+measured size/retention budgets, optional-source coverage and RSS presets, daily run time,
+and notification/backup procedures. The initial repository boundary, JSON-only NAS output,
+reader-owned build, separate subdomain, credential-file format, and DNS-only hosting approach
+are the baseline of this revised plan.
 
 ## References
 
-- [Current deployment and feed behavior](../README.md)
+- [Current service and deployment documentation](../README.md)
 - [Native preprint source plan](native-preprint-sources-plan.md)
-- [GitHub Pages custom domains](https://docs.github.com/en/pages/configuring-a-custom-domain-for-your-github-pages-site/managing-a-custom-domain-for-your-github-pages-site)
-- [GitHub Pages custom workflows](https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages)
+- [GitHub Pages user and project sites](https://docs.github.com/en/pages/getting-started-with-github-pages/what-is-github-pages#types-of-github-pages-sites)
+- [Custom domains across repositories](https://docs.github.com/en/pages/configuring-a-custom-domain-for-your-github-pages-site/about-custom-domains-and-github-pages#using-a-custom-domain-across-multiple-repositories)
+- [Configuring a Pages subdomain](https://docs.github.com/en/pages/configuring-a-custom-domain-for-your-github-pages-site/managing-a-custom-domain-for-your-github-pages-site#configuring-a-subdomain)
+- [Custom Pages workflows](https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages)
 - [GitHub Pages limits](https://docs.github.com/en/pages/getting-started-with-github-pages/github-pages-limits)
+- [Cloudflare DNS-only versus proxied records](https://developers.cloudflare.com/dns/proxy-status/)
+- [OpenAlex authentication and cursor paging](https://help.openalex.org/api/authentication/)

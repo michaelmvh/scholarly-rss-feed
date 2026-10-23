@@ -54,12 +54,13 @@ The image and Compose file update independently:
 
 ### Proposed static hosting
 
-The [static reading site migration plan](docs/static-reading-site-plan.md) describes moving
-public hosting to GitHub Pages while keeping scheduled generation on the NAS,
-`reading.michaelmvh.com`, the reader's icons, and RSS. It assumes a clean cutover to new
-subscription URLs without strict backward compatibility, and covers static filtering,
-publication safety, and rollback. This is a proposal; the deployment instructions below
-still describe the current NAS-hosted service.
+The [JSON-first reading site migration plan](docs/static-reading-site-plan.md) separates
+Rust collection on the NAS from reader presentation: the NAS publishes JSON to
+`reading-site/data/`, and that repository's TypeScript build generates HTML and RSS for
+GitHub Pages. It preserves `reading.michaelmvh.com` and the reader's icons, with independent
+portfolio/reader deployments, DNS-only routing, and no strict legacy URL compatibility.
+The plan identifies which existing drafts need refactoring; it is not a deployment-ready
+description of those drafts. The instructions below still describe the NAS-hosted service.
 
 ### Run-once static export
 
