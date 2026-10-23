@@ -9,7 +9,7 @@ mod openalex_enrichment;
 mod provenance;
 mod reader;
 mod snapshot_store;
-mod static_export;
+mod data_export;
 mod works;
 
 use crate::config::{Config, FeedConfig};
@@ -174,7 +174,7 @@ struct CliArgs {
     address: String,
     config_path: PathBuf,
     comparison: Option<ComparisonArgs>,
-    export: Option<static_export::ExportArgs>,
+    export: Option<data_export::ExportArgs>,
 }
 
 struct ComparisonArgs {
@@ -275,8 +275,8 @@ async fn main() {
     CONFIG_PATH.set(cli.config_path.clone()).ok();
 
     if let Some(export) = cli.export {
-        if let Err(error) = static_export::run(&export, &cli.config_path).await {
-            eprintln!("Static export failed: {error}");
+        if let Err(error) = data_export::run(&export, &cli.config_path).await {
+            eprintln!("Data export failed: {error}");
             std::process::exit(1);
         }
         return;
@@ -341,23 +341,22 @@ async fn main() {
 
 /// Parse CLI args: first non-flag positional is the bind address, `--config <path>`
 /// selects the feeds config file, and `--compare-curated <feed> <source>` runs
-/// an evaluation instead of the server.
+/// an evaluation instead of the server. `--export <directory>` emits JSON data;
+/// `--previous <directory>` supplies the prior retained data snapshot.
 fn parse_cli_args_from(args: impl IntoIterator<Item = String>) -> Result<CliArgs, String> {
     let mut address: Option<String> = None;
     let mut config: Option<String> = None;
     let mut comparison = None;
     let mut export_dir = None;
-    let mut site_url = None;
     let mut previous_dir = None;
 
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--export" | "--site-url" | "--previous" => {
+            "--export" | "--previous" => {
                 let value = args.next().ok_or_else(|| format!("{arg} requires a value"))?;
                 match arg.as_str() {
                     "--export" => export_dir = Some(PathBuf::from(value)),
-                    "--site-url" => site_url = Some(value),
                     _ => previous_dir = Some(PathBuf::from(value)),
                 }
             }
@@ -392,16 +391,13 @@ fn parse_cli_args_from(args: impl IntoIterator<Item = String>) -> Result<CliArgs
         }
     }
 
-    if export_dir.is_none() && (site_url.is_some() || previous_dir.is_some()) {
-        return Err("--site-url and --previous require --export.".to_string());
+    if export_dir.is_none() && previous_dir.is_some() {
+        return Err("--previous requires --export.".to_string());
     }
     if export_dir.is_some() && (comparison.is_some() || address.is_some()) {
         return Err("--export cannot be combined with a server address or --compare-curated.".to_string());
     }
-    let export = export_dir.map(|output| {
-        let site_url = site_url.ok_or_else(|| "--export requires --site-url.".to_string())?;
-        static_export::ExportArgs::new(output, &site_url, previous_dir)
-    }).transpose()?;
+    let export = export_dir.map(|output| data_export::ExportArgs::new(output, previous_dir));
     let address = address.unwrap_or_else(|| "127.0.0.1:3005".to_string());
     let config = config
         .or_else(|| env::var("GSRF_CONFIG").ok())
@@ -1410,6 +1406,14 @@ async fn build_feed_with_policy(
     channel.set_pub_date(now.clone());
     channel.set_last_build_date(now);
 
+    Ok(GeneratedFeed {
+        channel,
+        reader: reader_feed_from_works(request, &works),
+    })
+}
+
+fn reader_feed_from_works(request: &FeedRequest, works: &[Work]) -> reader::Feed {
+    let (title, description) = channel_metadata(request);
     let publications = works
         .iter()
         .map(|work| work_to_publication(work, &request.people))
@@ -1457,15 +1461,7 @@ async fn build_feed_with_policy(
         }
     }));
 
-    Ok(GeneratedFeed {
-        channel,
-        reader: reader::Feed {
-            title,
-            description,
-            publications,
-            paper_sources,
-        },
-    })
+    reader::Feed { title, description, publications, paper_sources }
 }
 
 fn channel_metadata(request: &FeedRequest) -> (String, String) {

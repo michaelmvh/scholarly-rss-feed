@@ -1,70 +1,62 @@
-# Container-only NAS publication: DSM walkthrough
+# JSON-only NAS publication: DSM walkthrough
 
-The publisher is a separate, one-shot container. It includes the existing Rust exporter,
-Node.js validation runtime, and Git. GitHub Actions is polled through its REST API, so no
-GitHub CLI is needed. The NAS host needs only Container Manager and Task Scheduler:
-**do not enable SSH or install Git, Node, rsync, or GitHub CLI on the NAS.**
+The NAS collects and publishes article **JSON**, not HTML or RSS. `reading-site` owns the
+reader UX and builds the website in GitHub Actions. Site URLs, styles, and templates are
+reader settings; updating them does not require changing the NAS image or collecting again.
 
-Keep the existing reader, Cloudflare tunnel, and **Update Scholar RSS** task unchanged
-throughout preparation. This guide supersedes the earlier host-based publication script.
-The new publisher has no listening ports and no Docker socket mount.
+The one-shot publisher image contains Rust, Node.js for JSON validation/orchestration, and
+Git. No SSH service, host Git/Node/rsync/GitHub CLI installation, incoming port, or Docker
+socket mount is needed. Keep the existing reader, tunnel, and weekly **Update Scholar RSS**
+task unchanged until the replacement has completed its observation period.
 
-## 0. Repository prerequisites
+## 0. Prerequisites and changes from the earlier draft
 
-Review and merge the source PR stack, including the container-only publisher, and the
-[reading-site publishing PRs](https://github.com/michaelmvh/reading-site/pulls).
-Do not use the old server image to run the publisher. A successful **Publish Docker image**
-workflow must produce:
+Review and merge the consolidated collector/publisher and reader PRs. Wait for the source
+repository's successful **Publish Docker image** run to publish:
 
 ```text
 ghcr.io/michaelmvh/scholarly-rss-feed-publisher:latest
 ```
 
-The workflow also produces immutable `sha-...` tags. Prefer the reviewed immutable tag in
-`static-compose.yml` for deployment. The original `scholarly-rss-feed` image remains the
-HTTP server; both images reuse the same Rust build.
+Use the reviewed immutable `sha-...` tag in Compose where possible. Make the GHCR publisher
+package public for anonymous NAS pulls if necessary. The original `scholarly-rss-feed`
+image remains the HTTP server, independently of the new publisher.
 
-Make the new GHCR publisher package public if it is private after its first publication,
-so the NAS can pull it without an additional registry credential. The GitHub Pages source
-must be **GitHub Actions**. Keep `PAGES_DEPLOY_ENABLED=false` until step 5.
+The reader repository's main branch must contain `scripts/validate-data.ts`, its schema,
+and its TypeScript site build. Earlier prebuilt-HTML deployment drafts are not sufficient.
+GitHub Pages should use **GitHub Actions**, with publication disabled until the preview run.
 
-No image is available merely because a draft PR exists; wait for its merged build.
+If you prepared configuration from the earlier instructions, **remove `SITE_URL` from
+publisher.env**. The publisher now rejects it. Set the reader repository's Actions variable
+`READER_SITE_URL` instead; the initial default is `https://michaelmvh.com/reading-site/`.
+Do not reuse an old `site/data/archive.json` as a new snapshot. No legacy-output migration
+is implicit; the initial JSON data publication starts with the explicit bootstrap flag.
 
-## 1. Prepare two private credentials
+## 1. Prepare credentials privately
 
-Obtain a verified free [OpenAlex API key](https://openalex.org/settings/api-key).
-Cursor paging beyond the first page requires a key; an email/contact address alone is
-insufficient.
+Obtain a verified free [OpenAlex API key](https://openalex.org/settings/api-key). Larger
+feeds require authenticated cursor paging beyond the first page.
 
-Create a GitHub **fine-grained personal access token**, owned by the account that owns
-`reading-site`, with access to **only `reading-site`**:
+Create a GitHub fine-grained personal access token with access to **only `reading-site`**,
+repository **Contents: Read and write**, and **Actions: Read-only**. Choose an expiration
+you can renew. Workflow-editing, administration, SSH, and registry permissions are not needed.
+The token is repository-scoped, not technically limited to the `data/` path.
 
-- Repository **Contents: Read and write** (clone and push generated output).
-- Repository **Actions: Read-only** (inspect the publication workflow and deploy result).
-- Metadata read access is included automatically.
-
-Choose an expiration you can maintain and arrange a renewal reminder. No workflow-editing,
-administration, SSH key, or NAS login permission is required. The publisher does not change
-GitHub variables or DNS on your behalf.
-
-Create a single plain UTF-8 file named **secrets.env**, based on
-`NAS/secrets.env.example`, and replace both placeholders:
+Create a plain UTF-8 `secrets.env` file, using `NAS/secrets.env.example`:
 
 ```dotenv
 PUBLISH_GITHUB_TOKEN=YOUR_GITHUB_TOKEN
 GSRF_OPENALEX_API_KEY=YOUR_OPENALEX_KEY
 ```
 
-Do not paste either value into a PR/chat or include it in an image, Compose YAML, task
-command, or `publisher.env`. `secrets.env` is mounted as a read-only file and parsed by the
-publisher; do not add it to Compose's `env_file`. Comments and quoted dotenv values are
-supported. Missing keys, unrelated settings, and invalid key values stop startup.
-Read-only mounting prevents modification, not access by other code in the same container;
-use only the reviewed publisher image and publishing-repository code.
+Do not share these values in chat/PRs, commit them, or put them in an image or task command.
+Compose mounts the file read-only. It is parsed by the publisher, not injected through
+`env_file`. Both keys are required; unrelated settings belong in `publisher.env`.
+Read-only mounting does not isolate secrets from other trusted code in the same container.
 
-## 2. Create the DSM folders and configuration
+## 2. Prepare the File Station folder
 
-In **File Station**, create a separate folder under the existing `docker` shared folder:
+Create a separate folder under the existing Docker shared folder:
 
 ```text
 /volume1/docker/reading-publisher/
@@ -74,16 +66,14 @@ In **File Station**, create a separate folder under the existing `docker` shared
     state/
 ```
 
-Adjust `/volume1` if your Docker shared folder is on another volume. Use a separate folder
-from the existing reader. Restrict the folder and especially `secrets.env` to the administrator
-and Container Manager account; do not expose it through a public share.
+Adjust the volume if your Docker share is elsewhere. Restrict this new folder and its
+credentials to your administrator/Container Manager access; do not change the existing
+reader's folder or enable public sharing.
 
-Upload `NAS/static-compose.yml` from the reviewed source revision. Copy
-`NAS/publisher.env.example` to a file named **publisher.env**, then edit:
+Upload `NAS/static-compose.yml`. Copy `NAS/publisher.env.example` to **publisher.env**:
 
 ```dotenv
 PUBLISH_REPOSITORY=michaelmvh/reading-site
-SITE_URL=https://michaelmvh.com/reading-site/
 PUBLISH_MODE=prepare
 BOOTSTRAP_EXPORT=true
 ALLOW_FEED_SHRINK=false
@@ -92,154 +82,122 @@ PUBLISH_GIT_NAME=Reading Site Publisher
 PUBLISH_GIT_EMAIL=YOUR_GITHUB_NOREPLY_EMAIL
 ```
 
-Use your GitHub noreply email for commit attribution if you do not want a personal address
-in the publishing repository's commit history. This is a Compose environment file, not
-a shell script: do not add `export` or shell commands.
+Use a real contact email for OpenAlex and, if desired, your GitHub noreply address for
+public commit attribution. This is an environment file, not a shell script.
 
-The state directory holds the publishing checkout, an isolated discovery cache, npm cache,
-and staging output. The publisher clones `reading-site` itself. You do not clone it on the
-NAS manually, and you must not share the old reader's writable cache. The publisher runs as
-root with only the `DAC_OVERRIDE` capability so it can read private administrator-owned
-credentials and write the mounted state directory. It is not privileged; its root filesystem
-and credentials mount remain read-only, and no other NAS directories are mounted.
+The publisher clones the repository itself into `state/checkout`, uses a dedicated cache,
+and reads the previous committed `data/` on subsequent runs. It must not share the old HTTP
+container's writable cache. Root with only `DAC_OVERRIDE` allows access to private
+administrator-owned bind mounts; rootfs and credentials remain read-only and no unrelated
+NAS directories are mounted.
 
-## 3. Run a prepare-only container
+## 3. Prepare locally without publishing
 
-In **Container Manager -> Project -> Create**, select the new folder and its Compose file.
-Create/start the project. Its `publisher` service will fetch, generate, and validate a
-snapshot, then exit. An exited container with exit code **0** is normal for this job.
+Use **Container Manager -> Project -> Create**, selecting this folder and Compose file.
+Create/start the publisher project. An exited container with code **0** is normal: it is
+a batch job, not a web server.
 
-`PUBLISH_MODE=prepare` makes no commits, pushes, or deployments. Successful logs end with
-**Nothing was committed, pushed, or deployed**. In File Station, inspect:
+In prepare mode, the container fetches publications, writes a complete JSON snapshot, and
+validates it against the reader's schema. It does not commit, push, build HTML, or deploy.
+Inspect Container Manager logs and:
 
 ```text
 state/last-run.json
-state/work/run-.../site/status.json
+state/work/run-.../data/snapshot.json
 ```
 
-`last-run.json` must say `"status": "prepared"`. Its `output` field identifies the generated
-site directory. This is local preparation, not a live browser preview yet.
+The run summary should say `"status": "prepared"`. Data lives under `articles/<bucket>.json`
+with checksums/counts in `snapshot.json`; there should be no HTML, RSS, or UI assets there.
+Full-feed collection needs the private OpenAlex key. Do not bypass errors or coverage checks.
 
-If it fails, inspect Container Manager logs and `state/last-run.json`. Common setup issues
-are an unavailable/private image, a missing infrastructure PR, file permissions, an
-unverified/expired key, provider limits, or invalid feed output. Do not disable validation
-or delete the old reader to work around an error.
-
-Do not schedule prepare mode repeatedly: it is for setup and troubleshooting.
-
-## 4. Create a disabled Task Scheduler job
+## 4. Create a disabled daily task
 
 In **Control Panel -> Task Scheduler**, create a **Scheduled Task -> User-defined script**:
 
 - Name: **Publish Reading Site**.
-- User: the account permitted to run Docker; on this NAS setup, normally **root**.
-- Schedule: daily at your preferred time.
-- Leave the task disabled until the manual publication succeeds.
-- Enable abnormal-exit notifications and saved task output; configure DSM email delivery
-  if it is not already configured.
+- User: the account allowed to run Docker, normally **root** for this setup.
+- Schedule: daily at your chosen time; leave disabled initially.
+- Enable saved output and abnormal-exit notifications, and configure DSM email delivery.
 
-Use this script, adjusting the volume/path if necessary:
+Script, with your actual volume/folder:
 
 ```sh
 cd /volume1/docker/reading-publisher &&
 /usr/local/bin/docker compose -f static-compose.yml run --rm publisher
 ```
 
-This uses only the Docker CLI already installed by Container Manager. Compose reads the
-current `publisher.env` on every task run. Nothing requires an interactive login shell,
-host Git credentials, or SSH access.
+Only the host's existing Docker CLI is used. Every invocation loads the current configuration
+and secret file. A container-owned lock prevents overlap with manual Container Manager runs.
 
-The container owns its lock, so a Task Scheduler run cannot race another publisher started
-through Container Manager. A lock error should be investigated, not suppressed.
+## 5. Publish the preview data and let GitHub build the site
 
-## 5. Publish the project-site preview
+In the reader repository, keep `READER_SITE_URL=https://michaelmvh.com/reading-site/` and
+set `PAGES_DEPLOY_ENABLED=true` when ready. Change `PUBLISH_MODE=publish` in the NAS file,
+keep `BOOTSTRAP_EXPORT=true` for this first publication, and manually **Run** the disabled task.
 
-In GitHub's `reading-site` repository, set the Actions repository variable
-`PAGES_DEPLOY_ENABLED=true`. Then edit `publisher.env` through File Station:
+The container commits only `data/`, preserves reader source, and waits for the resulting
+reader build/deploy job. A push alone, skipped deployment, or failed build is not success.
+Concurrent UI commits are fast-forwarded before the data is staged and the current schema
+is rechecked. Conflicts or a later push race fail explicitly; no force-push is used.
 
-```dotenv
-PUBLISH_MODE=publish
-```
-
-Keep the preview `SITE_URL` and initial `BOOTSTRAP_EXPORT=true`. Select the disabled
-**Publish Reading Site** task and use **Run** to run it manually.
-
-The publisher regenerates and validates the snapshot, updates only the checkout's `site/`
-directory, commits/pushes it, and waits for the corresponding Pages **deploy** job.
-A pushed commit or skipped deployment is not reported as success.
-
-Confirm `state/last-run.json` says `"status": "deployed"`, then open:
+Confirm `"status": "deployed"` in the run summary, then open:
 
 ```text
 https://michaelmvh.com/reading-site/
 https://michaelmvh.com/reading-site/feed.xml
 ```
 
-The project site inherits the account's existing website domain. Its output uses the
-`/reading-site/` path prefix until the final domain cutover.
+GitHub Actions, not the NAS, generated these pages and XML. They should remain usable with
+the NAS offline. Verify filters, article links, icons, and RSS without changing production DNS.
 
-## 6. Verify and enable daily publication
+## 6. Enable scheduling and independent monitoring
 
-Check the listing, article pages, author/date/source filters, RSS, favicon, and iOS icon.
-Run the job again and confirm existing articles/identities remain intact.
+After a successful first publication, change `BOOTSTRAP_EXPORT=false`, run again, and
+enable the daily task. Keep `ALLOW_FEED_SHRINK=false`; investigate removed feeds or a record
+count drop greater than 40%. Use its override only for a reviewed intentional change.
+Retained article removal needs an explicit data migration even with that override.
 
-Once the first published archive exists, change:
-
-```dotenv
-BOOTSTRAP_EXPORT=false
-```
-
-Then enable the daily task. Keep `ALLOW_FEED_SHRINK=false`; a removed feed or a record-count
-drop greater than 40% needs investigation. Use the shrink override only for a reviewed,
-intentional change, and restore it afterwards.
-
-For an independent alert while previewing, configure `reading-site` variables:
+Enable reader-repository monitoring with:
 
 ```text
+STATUS_MONITOR_ENABLED=true
 STATUS_URL=https://michaelmvh.com/reading-site/status.json
 MAX_SNAPSHOT_AGE_HOURS=48
-STATUS_MONITOR_ENABLED=true
 ```
 
-Enable GitHub Actions failure notifications and verify their delivery. GitHub-hosted
-monitoring can detect stale publication even when the NAS itself is powered off.
+Verify GitHub Actions failure notifications. The monitor checks **data_generated_at**, not
+the website's **built_at**, so UI-only rebuilds cannot conceal stale NAS data.
 
-## 7. Move the reading subdomain last
+## 7. Move the subdomain after preview acceptance
 
-Only after the preview works, record the current tunnel/DNS settings and plan the cutover:
+Register/verify `reading.michaelmvh.com` in the reader's Pages settings. Set the reader
+repository variable `READER_SITE_URL=https://reading.michaelmvh.com/` and manually run its
+build workflow using the already committed JSON. **No NAS config or data refresh is needed.**
 
-1. Register `reading.michaelmvh.com` as the publishing repository's Pages custom domain.
-2. Change `SITE_URL` to `https://reading.michaelmvh.com/` and publish root-path output.
-3. Change only the `reading` DNS record to a DNS-only CNAME targeting
-   `michaelmvh.github.io`. Leave apex, `www`, and mail records alone.
-4. Verify the Pages certificate, HTTPS, articles, icons, and XML at the final hostname.
-5. Update RSS subscriptions and `STATUS_URL` to the final hostname.
+Coordinate that build with changing only `reading` to a DNS-only CNAME targeting
+`michaelmvh.github.io`. Verify HTTPS, listings, article paths, icons, and RSS. Update
+subscriptions and `STATUS_URL` to the final hostname. Leave apex, `www`, mail, and unrelated
+tunnels unchanged. DNS/certificate delays mean this is not guaranteed zero downtime.
 
-Coordinate these steps: project-path output and root-path output are different, and DNS
-and certificate provisioning can take time. A zero-downtime flip is not guaranteed.
-Do not stop the old reader or tunnel during this transition.
+Keep the old NAS reader and its tunnel as a fallback through at least one week of successful
+scheduled updates. Retire them only afterwards. The existing weekly image-update task must
+be revised separately; it is not the daily JSON-publication task.
 
-After at least a week of successful scheduled publication and failure notifications,
-retire only the old reader's public-serving components. Update the old weekly image task
-separately; do not let it control the new publisher accidentally.
+## Recovery
 
-## Recovery and maintenance
+Failed export/validation leaves the public site unchanged. Failed staging directories are
+kept under their specific `state/work/run-...` paths. Inspect them before deleting only that
+attempt, and monitor disk space during repeated failures.
 
-`state/last-run.json` records prepared/deployed/unchanged/failed status without credentials.
-Failed staging directories are retained for inspection. Remove only the specific failed
-`state/work/run-...` directory after review; repeated failures can consume disk space.
+Dirty checkouts and unpushed commits are never reset automatically. Failed promotion retains
+previous data in that attempt's `previous-data` directory. Inspect the checkout or failed
+GitHub workflow before retrying. Recovery Git commands can run in the publisher image through
+a temporary DSM task; SSH need not be enabled.
 
-The publisher refuses dirty checkouts, unexpected remotes, and unpushed commits. It does
-not reset or discard user changes. A failed promotion keeps the old site in that attempt's
-`previous-site` directory. A failed push/deploy requires inspecting the retained commit
-and GitHub Actions before retrying. Git inspection can be run through a temporary DSM task
-using the same image, rather than enabling SSH; ask for the specific recovery commands
-before changing the checkout.
+After power loss, remove `state/publisher.lock` only after confirming no publisher is running.
+Back up committed data and credentials separately. Replace expired values in `secrets.env`;
+the next one-shot container reads them again.
 
-After power loss, remove `state/publisher.lock` through File Station only after confirming
-no publisher container is still running. Back up published archive data and credential
-file separately. Rotate expired tokens by editing `secrets.env`; one-off task runs
-read the current files each time.
-
-To update the publisher, select a reviewed image tag in Compose, pull it through Container
-Manager, and rehearse a manual run. None of this requires updating the old HTTP container.
+For reader regressions, restore reader source and rebuild with compatible data. For bad
+article data, restore a known-good JSON revision and rebuild. Keep schema compatibility in
+mind. Rollback to the NAS hostname/tunnel requires restoring old RSS URLs manually.

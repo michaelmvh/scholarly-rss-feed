@@ -189,7 +189,7 @@ pub fn render_article(
     ))
 }
 
-pub(super) fn render_metadata(publication: &Publication) -> (String, &'static str, String) {
+fn render_metadata(publication: &Publication) -> (String, &'static str, String) {
     let date = publication
         .publication_date
         .as_deref()
@@ -219,7 +219,7 @@ pub(super) fn render_metadata(publication: &Publication) -> (String, &'static st
     (date, separator, venue)
 }
 
-pub(super) fn render_authors(authors: &[Author]) -> String {
+fn render_authors(authors: &[Author]) -> String {
     if authors.is_empty() {
         return String::new();
     }
@@ -240,7 +240,7 @@ pub(super) fn render_authors(authors: &[Author]) -> String {
     format!(r#"<p class="authors">{authors}</p>"#)
 }
 
-pub(super) fn render_provenance(publication: &Publication) -> String {
+fn render_provenance(publication: &Publication) -> String {
     let curated_sources = publication
         .discovery_sources
         .iter()
@@ -597,7 +597,7 @@ fn format_reader_date(date: &str) -> String {
         .unwrap_or_else(|_| date.to_string())
 }
 
-pub(super) fn escape_html(value: &str) -> String {
+fn escape_html(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
         match character {

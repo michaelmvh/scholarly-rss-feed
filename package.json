@@ -2,13 +2,11 @@
   "name": "scholarly-rss-reader-tests",
   "private": true,
   "scripts": {
-    "test": "node --test tests/reader.test.cjs tests/static-model.test.mjs tests/publisher.test.mts",
-    "test:browser": "playwright test",
+    "test": "node --test tests/reader.test.cjs tests/publisher.test.mts",
     "typecheck:publisher": "tsc --project tsconfig.publisher.json",
     "check:publisher-compose": "node tests/publisher-compose.mts"
   },
   "devDependencies": {
-    "@playwright/test": "^1.64.1",
     "@types/node": "^26.6.5",
     "typescript": "^7.0.2"
   }

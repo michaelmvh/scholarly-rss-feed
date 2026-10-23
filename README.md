@@ -59,74 +59,70 @@ Rust collection on the NAS from reader presentation: the NAS publishes JSON to
 `reading-site/data/`, and that repository's TypeScript build generates HTML and RSS for
 GitHub Pages. It preserves `reading.michaelmvh.com` and the reader's icons, with independent
 portfolio/reader deployments, DNS-only routing, and no strict legacy URL compatibility.
-The plan identifies which existing drafts need refactoring; it is not a deployment-ready
-description of those drafts. The instructions below still describe the NAS-hosted service.
+The revised implementation is consolidated in [collector/publisher PR #2](https://github.com/michaelmvh/scholarly-rss-feed/pull/2)
+and [reader PR #1](https://github.com/michaelmvh/reading-site/pull/1). Earlier implementation
+drafts are superseded by those branches. Reviewed merges, image publication, and a private
+key-backed NAS rehearsal are still required before cutover. The HTTP deployment instructions
+later in this README describe the existing fallback service.
 
-### Run-once static export
+### Run-once JSON export
 
-The exporter is an opt-in alternative to HTTP serving. It generates every configured named
-feed, actual RSS XML, individual article pages, reader icons, public metadata, and a retained
-article archive. It never starts a listening socket.
+The new reader's public contract lives in
+[`reading-site/schema/snapshot-v1.json`](https://github.com/michaelmvh/reading-site/blob/main/schema/snapshot-v1.json).
+This repository owns collection, enrichment, deduplication, identities, and JSON export.
+`reading-site` owns the new reader's TypeScript UX, HTML/RSS rendering, icons, and deployment.
+The existing HTTP server remains available separately as the legacy service.
 
 ```sh
-cargo run --locked -- --export /tmp/reading-next \
-  --site-url https://reading.michaelmvh.com/ --config feeds.toml
+cargo run --locked -- --export /tmp/reading-data-next --config feeds.toml
 ```
 
-The output directory must not already exist. On subsequent runs, retain published article
-identities and pages by passing `--previous /path/to/last-successful-output`. An explicitly
-supplied previous archive must exist and parse successfully; it is never silently discarded.
-Do not point the exporter directly at a live publishing checkout. Validate staging output
-before copying it into the publishing repository.
+The destination must be fresh. Subsequent exports use
+`--previous /path/to/last-successful-data` to retain article identities and metadata.
+The exporter writes **only JSON**, never HTML, XML, CSS, JavaScript, or icons:
 
-The root reader uses `default_feed`, `/feed.xml` is its RSS subscription, and each named
-feed has `/feeds/<name>/` and `/feeds/<name>/feed.xml`. New article pages live under
-`/article/<stable-id>/`. Old `?rss` URLs are not supported on static hosting. Named feed
-keys must use lowercase letters, digits, or hyphens, beginning with a letter or digit.
-The name `archive` is reserved for the retained metadata file.
-Use a site URL with a path prefix for a project-site preview.
+```text
+snapshot.json       # Schema version, data timestamp, feeds, and shard checksums/counts
+articles/ab.json    # Retained canonical records, bucketed by the first two ID characters
+articles/cd.json
+```
 
-`data/archive.json` is public, retained rendering metadata, not a private provider cache.
-Keep the entire previous output backed up. Empty required feeds, unsafe publication URLs,
-ambiguous identities, and malformed previous archives stop publication. Static export
-requires successful discovery refreshes: it does not publish last-known-good curated,
-bioRxiv, or arXiv data after a refresh failure. Incremental caches and conditional 304
-responses still avoid full historical downloads. Optional metadata enrichment may fail
-with an explicit log while base records remain usable. The HTTP service retains its
-existing stale-cache fallback policy.
+The publisher commits this directory as `reading-site/data/`. Stable sharding avoids one
+ever-growing file and limits unrelated Git changes. Each JSON file is limited to 50 MiB
+and the complete snapshot to 500 MiB. A manifest authenticates the bytes of every shard
+with SHA-256 and describes their expected record counts. It does not provide a cryptographic
+signature or replace access control.
 
-`status.json` reports snapshot generation time and the required refresh policy, not the
-publication time of the upstream papers or a guarantee that source catalogs are complete.
+Feed membership and tracked-author associations/defaults are separate from canonical
+article metadata, so two feeds can select the same paper differently. Identifiers retain
+known provider/version aliases. Ambiguous identity merges fail for review rather than
+silently dropping a previously published identity.
 
-For an offline synthetic preview, without provider requests:
+Dates retain the source value and collection-added dates remain separate. The current
+provider-neutral model does not expose reliable publication-date precision, so the exporter
+reports `unknown` rather than inferring precision from January 1 or the first of a month.
+The contract also supports explicit day/month/year precision when producers can establish it.
+
+The entire previous JSON snapshot is public metadata, not a private provider cache. Keep
+it backed up. Empty required feeds, unsafe URLs, malformed/checksum-invalid previous data,
+and required source-refresh failures stop publication. Incremental caches and successful
+conditional requests remain supported. Optional enrichment may fail with an explicit log;
+the HTTP service retains its existing stale-cache fallback policy.
+
+The public site URL belongs to the reader build. `--site-url` is no longer accepted here.
+Changing preview/production domains or reader styling does not require recollecting data.
+
+For a synthetic fixture with no provider requests:
 
 ```sh
-GSRF_TEST_EXPORT_DIR=/tmp/reading-fixture \
+GSRF_TEST_EXPORT_DIR=/tmp/reading-data-fixture \
   cargo test --locked export_fixture -- --ignored
 ```
 
-The destination must be fresh. These example papers are fixtures, not a production feed.
-The CI workflow runs Rust and reader tests and uploads this synthetic site as an artifact.
-
-Static pages progressively enhance the pre-rendered listing with browser-only date, author,
-and source filters. Optional authors remain in RSS; default, all, and explicitly empty
-custom author selections remain distinct. URL state survives direct article navigation,
-reloads, and browser back/forward. Invalid filter URLs show an error and a clear-filters
-recovery action. RSS links always describe the complete named feed, not the filtered view.
-Only sources collected for that named feed are offered; add separate named feed presets
-in `feeds.toml` for other source combinations.
-
-Browser tests use Node.js 24 and Playwright:
-
-```sh
-npm ci
-npm test
-npx playwright install chromium
-GSRF_TEST_EXPORT_DIR=/tmp/reading-fixture npm run test:browser
-```
-
-Generate the fixture first using the preceding command. The browser runner owns and stops
-its local static server; it never needs the NAS or live provider APIs.
+CI uploads this JSON fixture. Reader rendering/browser tests now belong to `reading-site`;
+source tests retain the existing HTTP-reader coverage and publisher orchestration coverage.
+Collector CI also pins a compatible reader revision and runs its build/browser checks against
+the actual Rust fixture. Update that pin deliberately when changing the public contract.
 
 For the staged NAS migration, see [the static publication runbook](NAS/STATIC-PUBLISHING.md),
 [`NAS/static-compose.yml`](NAS/static-compose.yml), and
@@ -135,10 +131,13 @@ container includes the Rust exporter, Node.js validation runtime, and Git. It po
 REST API instead of requiring GitHub CLI. No Git/Node/rsync installation, SSH service, or
 Docker socket is needed on the NAS. The existing always-on reader remains separate.
 
-The publisher defaults to `PUBLISH_MODE=prepare`: it generates and validates output without
-committing, pushing, or deploying. `PUBLISH_MODE=publish` additionally pushes public output
-and verifies the matching Pages deploy job. A dedicated state mount preserves the checkout,
-article history, caches, lock, and a credential-free `last-run.json`.
+The publisher defaults to `PUBLISH_MODE=prepare`: it generates and validates JSON without
+committing, pushing, or deploying. `PUBLISH_MODE=publish` commits only `data/`, preserves
+concurrent UI commits, and confirms the matching reader build/Pages deploy job. It never
+commits `site/`, `dist/`, reader source, or workflow changes. `SITE_URL` must be removed from
+old publisher configuration; `READER_SITE_URL` is a reader-repository Actions variable.
+A dedicated state mount preserves the checkout, article history, caches, lock, and a
+credential-free `last-run.json`.
 
 GitHub and OpenAlex credentials are read from one read-only `secrets.env` file, based on
 [`NAS/secrets.env.example`](NAS/secrets.env.example). It uses ordinary `KEY=VALUE` syntax,
@@ -152,7 +151,9 @@ embedded in URLs, generated files, or the image.
 
 The Dockerfile has explicit `server` and `publisher` targets; the default remains `server`.
 GitHub Actions publishes both images for `linux/amd64`. Publisher orchestration is strict
-TypeScript run directly by Node.js 24. Use `npm run typecheck:publisher` and `npm test` for
+TypeScript run directly by Node.js 24. Validation installs only the reader repository's
+production dependencies; UI compilation/browser tooling is not run on the NAS.
+Use `npm run typecheck:publisher` and `npm test` for
 local checks. CI also builds the real publisher image and runs its orchestration tests
 with no network, a read-only root filesystem, and no Docker socket.
 

@@ -1,6 +1,5 @@
 mod filters;
 mod render;
-pub(crate) mod static_render;
 
 use crate::provenance::DiscoverySource;
 use serde::{Deserialize, Serialize};

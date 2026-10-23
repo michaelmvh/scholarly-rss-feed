@@ -11,7 +11,6 @@ const askpass = fileURLToPath(new URL("./git-askpass.sh", import.meta.url));
 export interface Config {
   state: string;
   repository: string;
-  siteUrl: string;
   mode: "prepare" | "publish";
   bootstrap: boolean;
   allowShrink: boolean;
@@ -71,9 +70,7 @@ async function credentials(file: string): Promise<{ githubToken: string; openale
 export async function loadConfig(env: NodeJS.ProcessEnv): Promise<Config> {
   const repository = env.PUBLISH_REPOSITORY?.trim() || "michaelmvh/reading-site";
   if (!/^[a-zA-Z0-9_-]+\/[a-zA-Z0-9_-][a-zA-Z0-9_.-]*$/.test(repository)) throw new Error("PUBLISH_REPOSITORY must be owner/repository");
-  const siteUrl = required(env, "SITE_URL");
-  const url = new URL(siteUrl);
-  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) throw new Error("SITE_URL must use HTTPS without credentials, query, or fragment");
+  if (env.SITE_URL) throw new Error("Remove SITE_URL from publisher.env; the reader build now owns its public URL.");
   const mode = env.PUBLISH_MODE ?? "prepare";
   if (mode !== "prepare" && mode !== "publish") throw new Error("PUBLISH_MODE must be prepare or publish");
   const state = path.resolve(env.PUBLISH_STATE_DIR || "/state");
@@ -82,7 +79,7 @@ export async function loadConfig(env: NodeJS.ProcessEnv): Promise<Config> {
   const mailto = required(env, "GSRF_MAILTO");
   if (!/^[^\s@]+@[^\s@]+$/.test(gitEmail) || !/^[^\s@]+@[^\s@]+$/.test(mailto)) throw new Error("Set valid PUBLISH_GIT_EMAIL and GSRF_MAILTO addresses in publisher.env");
   return {
-    state, repository, siteUrl, mode,
+    state, repository, mode,
     bootstrap: boolean(env, "BOOTSTRAP_EXPORT"),
     allowShrink: boolean(env, "ALLOW_FEED_SHRINK"),
     gitName: required(env, "PUBLISH_GIT_NAME"),
@@ -151,7 +148,7 @@ export async function publish(config: Config, dependencies: Dependencies = {}): 
   let attempt: string | undefined;
   let failure: unknown;
   const checkout = path.join(config.state, "checkout");
-  const destination = path.join(checkout, "site");
+  const destination = path.join(checkout, "data");
   const remote = `https://github.com/${config.repository}.git`;
   const cleanEnv: NodeJS.ProcessEnv = {
     PATH: process.env.PATH, HOME: home, LANG: "C.UTF-8",
@@ -181,27 +178,27 @@ export async function publish(config: Config, dependencies: Dependencies = {}): 
     await git(["fetch", "origin", "main"]);
     await git(["merge", "--ff-only", "origin/main"]);
     if (await git(["rev-list", "--count", "origin/main..HEAD"]) !== "0") throw new Error("Unpushed commits remain; recover the previous push before starting another export");
-    if (!(await exists(path.join(checkout, "scripts/validate.ts")))) throw new Error("Merge the reading-site infrastructure PR before running the publisher");
-    const previous = await exists(destination);
+    if (!(await exists(path.join(checkout, "scripts/validate-data.ts")))) throw new Error("Merge the JSON-first reading-site PR before running the publisher");
+    let previous = await exists(destination);
     if (previous) {
-      if (!(await lstat(destination)).isDirectory() || (await lstat(destination)).isSymbolicLink()) throw new Error("Previous site must be a real directory");
-      if (!(await exists(path.join(destination, "data/archive.json")))) throw new Error("Previous article archive is missing; restore it before publishing");
+      if (!(await lstat(destination)).isDirectory() || (await lstat(destination)).isSymbolicLink()) throw new Error("Previous data must be a real directory");
+      if (!(await exists(path.join(destination, "snapshot.json")))) throw new Error("Previous article snapshot is missing; restore it before publishing");
     } else if (!config.bootstrap) {
-      throw new Error("No previous site exists. Set BOOTSTRAP_EXPORT=true only for the initial publication");
+      throw new Error("No previous data exists. Set BOOTSTRAP_EXPORT=true only for the initial publication");
     }
     attempt = await mkdtemp(path.join(work, "run-"));
-    const candidate = path.join(attempt, "site");
-    log("Generating a static snapshot; the existing NAS reader is not involved.");
-    const args = ["--export", candidate, "--site-url", config.siteUrl];
+    const candidate = path.join(attempt, "data");
+    log("Collecting a JSON snapshot; HTML and RSS are built by GitHub Actions.");
+    const args = ["--export", candidate];
     if (previous) args.push("--previous", destination);
     const output = await run("scholarly-rss-feed", args, {
       cwd: config.state,
       env: { ...cleanEnv, GSRF_CONFIG: "/config/feeds.toml", GSRF_CACHE_DIR: cache, GSRF_PROVIDER: "openalex", GSRF_MAILTO: config.mailto, GSRF_OPENALEX_API_KEY: config.openalexKey },
     });
     if (output) log(output);
-    await run("npm", ["ci", "--ignore-scripts", "--no-audit", "--no-fund"], { cwd: checkout, env: cleanEnv });
-    await run("node", ["scripts/validate.ts", candidate], {
-      cwd: checkout, env: { ...cleanEnv, PREVIOUS_SITE: previous ? destination : "", ALLOW_FEED_SHRINK: String(config.allowShrink) },
+    await run("npm", ["ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"], { cwd: checkout, env: cleanEnv });
+    await run("node", ["scripts/validate-data.ts", candidate], {
+      cwd: checkout, env: { ...cleanEnv, PREVIOUS_DATA: previous ? destination : "", ALLOW_FEED_SHRINK: String(config.allowShrink) },
     });
     if (config.mode === "prepare") {
       const previousSummary = path.join(config.state, "last-run.json");
@@ -215,13 +212,22 @@ export async function publish(config: Config, dependencies: Dependencies = {}): 
       log(`Prepared and validated ${candidate}. Nothing was committed, pushed, or deployed. Set PUBLISH_MODE=publish when ready.`);
       return;
     }
-    const backup = path.join(attempt, "previous-site");
+    // UI code can change during collection. Refresh the data handoff against main
+    // and validate against that version's schema without overwriting source changes.
+    await git(["fetch", "origin", "main"]);
+    await git(["merge", "--ff-only", "origin/main"]);
+    previous = await exists(destination);
+    await run("npm", ["ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"], { cwd: checkout, env: cleanEnv });
+    await run("node", ["scripts/validate-data.ts", candidate], {
+      cwd: checkout, env: { ...cleanEnv, PREVIOUS_DATA: previous ? destination : "", ALLOW_FEED_SHRINK: String(config.allowShrink) },
+    });
+    const backup = path.join(attempt, "previous-data");
     if (previous) await rename(destination, backup);
     try { await rename(candidate, destination); } catch (error) {
       if (previous) await rename(backup, destination);
       throw error;
     }
-    await git(["add", "--", "site"]);
+    await git(["add", "--", "data"]);
     // An empty staged diff is a normal no-op, unlike a failed command.
     const diff = await git(["diff", "--cached", "--name-only"]);
     if (!diff) {
@@ -230,8 +236,8 @@ export async function publish(config: Config, dependencies: Dependencies = {}): 
       await summary(config.state, { status: "unchanged", revision });
       log("No public snapshot changes; the existing revision's deployment was confirmed.");
     } else {
-      if (diff.split("\n").some((file) => !file.startsWith("site/"))) throw new Error("Refusing to commit changes outside site/");
-      await git(["commit", "-m", "Publish scholarly reading snapshot"]);
+      if (diff.split("\n").some((file) => !file.startsWith("data/"))) throw new Error("Refusing to commit changes outside data/");
+      await git(["commit", "-m", "Publish scholarly article data"]);
       const revision = await git(["rev-parse", "HEAD"]);
       await git(["push", "origin", "HEAD:main"]);
       log(`Pushed ${revision}; waiting for the matching Pages deploy job.`);

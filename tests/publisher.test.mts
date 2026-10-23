@@ -22,13 +22,13 @@ async function setup() {
   git(root, ["init", "--bare", "--initial-branch=main", remote]);
   git(seed, ["init", "--initial-branch=main"]);
   await mkdir(path.join(seed, "scripts"));
-  await writeFile(path.join(seed, "scripts/validate.ts"), "// fixture");
+  await writeFile(path.join(seed, "scripts/validate-data.ts"), "// fixture");
   await writeFile(path.join(seed, "keep.txt"), "must survive");
   git(seed, ["add", "."]); git(seed, ["commit", "-m", "Bootstrap"]);
   git(seed, ["remote", "add", "origin", remote]); git(seed, ["push", "-u", "origin", "main"]);
   const config: Config = {
     state: path.join(root, "state"), repository: "fixture/reading-site",
-    siteUrl: "https://example.org/reading/", mode: "prepare", bootstrap: true,
+    mode: "prepare", bootstrap: true,
     allowShrink: false, gitName: "Fixture", gitEmail: "fixture@example.org",
     mailto: "fixture@example.org", githubToken: "fixture-github-token", openalexKey: "fixture-openalex-key",
   };
@@ -37,6 +37,7 @@ async function setup() {
   let fail: "export" | "validate" | "push" | "deploy" | undefined;
   let wrongOrigin = false;
   let deploymentChecks = 0;
+  let updateUiDuringCollection = false;
   const run: Run = async (command, args, options) => {
     calls.push({ command, args, env: options.env });
     if (command === "git") {
@@ -52,15 +53,19 @@ async function setup() {
     if (command === "scholarly-rss-feed") {
       if (fail === "export") throw new Error("export failed");
       const candidate = args[args.indexOf("--export") + 1];
-      await mkdir(path.join(candidate, "data"), { recursive: true });
-      await writeFile(path.join(candidate, "data/archive.json"), '{"schema_version":1,"articles":{}}');
-      await writeFile(path.join(candidate, "index.html"), "fixture");
+      await mkdir(candidate, { recursive: true });
+      await writeFile(path.join(candidate, "snapshot.json"), '{"schema_version":1,"article_files":[]}');
+      if (updateUiDuringCollection) {
+        await writeFile(path.join(seed, "reader-ui.txt"), "independent UI update");
+        git(seed, ["add", "reader-ui.txt"]); git(seed, ["commit", "-m", "Update reader UI"]); git(seed, ["push"]);
+        updateUiDuringCollection = false;
+      }
       return `Generated fixture (redaction probe: ${config.openalexKey})`;
     }
     if (command === "npm") return "";
     if (command === "node") {
       if (fail === "validate") throw new Error("validation failed");
-      assert.ok((await lstat(path.join(args[1], "data/archive.json"))).isFile());
+      assert.ok((await lstat(path.join(args[1], "snapshot.json"))).isFile());
       return "";
     }
     throw new Error(`Unexpected command: ${command}`);
@@ -70,6 +75,7 @@ async function setup() {
     git: (args: string[]) => git(path.join(config.state, "checkout"), args),
     fail: (value: typeof fail) => { fail = value; },
     wrongOrigin: () => { wrongOrigin = true; },
+    updateUi: () => { updateUiDuringCollection = true; },
     deploymentChecks: () => deploymentChecks,
     run: () => publish(config, {
       run, request: async () => ({}), log: (message) => log.push(message),
@@ -94,7 +100,7 @@ test("prepare mode validates without pushing and keeps only its latest prepared 
   } finally { await rm(f.root, { recursive: true }); }
 });
 
-test("publish commits only site output, waits for deployment, and skips unchanged reruns", async () => {
+test("publish commits only JSON data, waits for deployment, and skips unchanged reruns", async () => {
   const f = await setup();
   try {
     f.config.mode = "publish";
@@ -131,6 +137,18 @@ test("credentials are isolated from validation/npm and never put in command argu
       }
     }
     assert.equal(redact(`${f.config.githubToken} ${f.config.openalexKey}`, f.config), "[REDACTED] [REDACTED]");
+  } finally { await rm(f.root, { recursive: true }); }
+});
+
+test("a concurrent reader UI commit is preserved while the publisher commits only data", async () => {
+  const f = await setup();
+  try {
+    f.config.mode = "publish";
+    f.updateUi();
+    await f.run();
+    assert.equal(await readFile(path.join(f.config.state, "checkout/reader-ui.txt"), "utf8"), "independent UI update");
+    assert.equal(f.git(["show", "--pretty=", "--name-only", "HEAD"]), "data/snapshot.json");
+    assert.equal(f.git(["status", "--porcelain"]), "");
   } finally { await rm(f.root, { recursive: true }); }
 });
 
@@ -177,13 +195,14 @@ test("configuration reads one dotenv credentials file and prepare is the default
     const secrets = path.join(root, "secrets.env");
     await writeFile(secrets, '# Private values\nPUBLISH_GITHUB_TOKEN="fixture-gh"\nGSRF_OPENALEX_API_KEY=fixture-oa\n');
     const env = {
-      SITE_URL: "https://example.org/", PUBLISH_GIT_NAME: "Fixture", PUBLISH_GIT_EMAIL: "fixture@example.org",
+      PUBLISH_GIT_NAME: "Fixture", PUBLISH_GIT_EMAIL: "fixture@example.org",
       GSRF_MAILTO: "fixture@example.org", PUBLISH_SECRETS_FILE: secrets,
     };
     const config = await loadConfig(env);
     assert.equal(config.mode, "prepare");
     assert.equal(config.githubToken, "fixture-gh");
     assert.equal(config.openalexKey, "fixture-oa");
+    await assert.rejects(loadConfig({ ...env, SITE_URL: "https://example.org/" }), /reader build/);
     await assert.rejects(loadConfig({ ...env, PUBLISH_MODE: "unsafe" }), /PUBLISH_MODE/);
     await assert.rejects(loadConfig({ ...env, PUBLISH_REPOSITORY: "https://evil.example/repo" }), /owner\/repository/);
     await writeFile(secrets, 'PUBLISH_GITHUB_TOKEN="bad\ntoken"\nGSRF_OPENALEX_API_KEY=fixture-oa\n');
