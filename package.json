@@ -1,0 +1,13 @@
+{
+  "name": "scholarly-rss-reader-tests",
+  "private": true,
+  "scripts": {
+    "test": "node --test tests/reader.test.cjs tests/publisher.test.mts",
+    "typecheck:publisher": "tsc --project tsconfig.publisher.json",
+    "check:publisher-compose": "node tests/publisher-compose.mts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "typescript": "^7.0.2"
+  }
+}

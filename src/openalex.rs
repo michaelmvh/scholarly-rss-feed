@@ -4,6 +4,87 @@ use std::collections::HashMap;
 
 pub const API_BASE: &str = "https://api.openalex.org";
 
+pub fn request(client: &reqwest::Client, url: url::Url) -> Result<reqwest::RequestBuilder, String> {
+    let key = match std::env::var("GSRF_OPENALEX_API_KEY") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err("GSRF_OPENALEX_API_KEY must contain valid text.".to_string());
+        }
+    };
+    request_with_key(client, url, key.as_deref())
+}
+
+fn request_with_key(
+    client: &reqwest::Client,
+    url: url::Url,
+    key: Option<&str>,
+) -> Result<reqwest::RequestBuilder, String> {
+    let official_api = url.scheme() == "https"
+        && url.host_str() == Some("api.openalex.org")
+        && url.port_or_known_default() == Some(443);
+    let mut request = client.get(url);
+    if let Some(key) = key.map(str::trim).filter(|key| !key.is_empty() && official_api) {
+        let mut authorization = reqwest::header::HeaderValue::from_str(&format!("Bearer {key}"))
+            .map_err(|_| "GSRF_OPENALEX_API_KEY is not a valid authorization value.".to_string())?;
+        authorization.set_sensitive(true);
+        request = request.header(reqwest::header::AUTHORIZATION, authorization);
+    }
+    Ok(request)
+}
+
+pub fn request_error(error: reqwest::Error) -> String {
+    match error.status() {
+        Some(reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN) =>
+            "OpenAlex authorization failed. Configure a verified GSRF_OPENALEX_API_KEY; cursor paging beyond the first page requires a key.".to_string(),
+        Some(reqwest::StatusCode::TOO_MANY_REQUESTS) =>
+            "OpenAlex rate or usage budget limit reached. Check the API key's usage before retrying.".to_string(),
+        _ => format!("OpenAlex request failed: {error}"),
+    }
+}
+
+#[cfg(test)]
+mod authentication_tests {
+    use super::*;
+
+    #[test]
+    fn key_is_a_sensitive_header_not_a_query_parameter() {
+        let key = "fixture-api-key";
+        let request = request_with_key(
+            &reqwest::Client::new(), url::Url::parse(&format!("{API_BASE}/works")).unwrap(), Some(key),
+        ).unwrap().build().unwrap();
+        let header = &request.headers()[reqwest::header::AUTHORIZATION];
+        assert_eq!(header.to_str().unwrap(), format!("Bearer {key}"));
+        assert!(header.is_sensitive());
+        assert!(!request.url().as_str().contains(key));
+        assert!(!format!("{request:?}").contains(key));
+    }
+
+    #[test]
+    fn anonymous_requests_work_and_keys_never_go_to_other_origins() {
+        for (url, key) in [
+            ("https://api.openalex.org/works", None),
+            ("https://api.openalex.org/works", Some("")),
+            ("https://example.org/works", Some("fixture-key")),
+            ("http://api.openalex.org/works", Some("fixture-key")),
+            ("https://api.openalex.org:8443/works", Some("fixture-key")),
+        ] {
+            let request = request_with_key(&reqwest::Client::new(), url::Url::parse(url).unwrap(), key)
+                .unwrap().build().unwrap();
+            assert!(!request.headers().contains_key(reqwest::header::AUTHORIZATION));
+        }
+    }
+
+    #[test]
+    fn invalid_authorization_is_rejected_without_echoing_the_value() {
+        let error = request_with_key(
+            &reqwest::Client::new(), url::Url::parse(API_BASE).unwrap(), Some("fixture\nkey"),
+        ).unwrap_err();
+        assert!(error.contains("not a valid authorization value"));
+        assert!(!error.contains("fixture"));
+    }
+}
+
 /// A single author record from `/authors`.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Author {

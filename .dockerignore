@@ -5,3 +5,12 @@
 Dockerfile
 docker-compose.yml
 .dockerignore
+node_modules
+test-results
+playwright-report
+.env
+**/.env
+NAS/publisher.env
+NAS/secrets.env
+NAS/secrets
+NAS/state

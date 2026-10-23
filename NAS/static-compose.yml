@@ -1,0 +1,27 @@
+services:
+  publisher:
+    image: ghcr.io/michaelmvh/scholarly-rss-feed-publisher:latest
+    init: true
+    env_file:
+      - publisher.env
+    environment:
+      PUBLISH_STATE_DIR: /state
+      PUBLISH_SECRETS_FILE: /run/secrets/credentials
+    volumes:
+      - ./state:/state
+    secrets:
+      - credentials
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    cap_add:
+      - DAC_OVERRIDE
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
+secrets:
+  credentials:
+    file: ./secrets.env

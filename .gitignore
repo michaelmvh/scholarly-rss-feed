@@ -1,7 +1,14 @@
 /target
+/node_modules
+/test-results
+/playwright-report
 
 /.idea
 .DS_Store
 
 # Cloudflare Tunnel token (docker-compose.nas.yml) — never commit secrets.
 .env
+/NAS/publisher.env
+/NAS/secrets.env
+/NAS/secrets/
+/NAS/state/

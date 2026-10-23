@@ -2,8 +2,9 @@
 
 Generates a single RSS feed of recent scientific publications for one or more authors
 **and/or journals**, sorted newest-first. Data is parsed from
-[OpenAlex](https://openalex.org) (a free, open catalog of scholarly works — no API key
-required). The project's original Google Scholar scraper is retained as an archived fallback
+[OpenAlex](https://openalex.org), a free, open catalog of scholarly works. Basic queries work
+without a key, but cursor paging beyond the first page requires a verified free API key.
+The project's original Google Scholar scraper is retained as an archived fallback
 provider that can be enabled with one environment variable.
 
 Feeds can be defined in a config file so a feed URL never has to change. Each URL provides a
@@ -24,6 +25,7 @@ The repository and published container are available at:
 - **Source:** <https://github.com/Michaelmvh/scholarly-rss-feed>
 - **Container:** <https://github.com/Michaelmvh/scholarly-rss-feed/pkgs/container/scholarly-rss-feed>
 - **Image:** `ghcr.io/michaelmvh/scholarly-rss-feed:latest`
+- **One-shot publisher image:** `ghcr.io/michaelmvh/scholarly-rss-feed-publisher:latest`
 
 The production update path is:
 
@@ -42,13 +44,118 @@ The NAS pulls the new image and recreates the container
 
 The application and `feeds.toml` are both baked into the image. The NAS therefore needs only
 [`NAS/docker-compose.yml`](./NAS/docker-compose.yml) and a private `.env` containing the
-Cloudflare token. It does not clone the source or compile Rust.
+Cloudflare token and provider settings. It does not clone the source or compile Rust.
 
 The image and Compose file update independently:
 
 - **Code or feed changes:** push to GitHub, then pull the new GHCR image on the NAS.
 - **Deployment changes:** upload the changed `NAS/docker-compose.yml` to the NAS and recreate
   the Container Manager project. GHCR cannot update the Compose file itself.
+
+### Proposed static hosting
+
+The [JSON-first reading site migration plan](docs/static-reading-site-plan.md) separates
+Rust collection on the NAS from reader presentation: the NAS publishes JSON to
+`reading-site/data/`, and that repository's TypeScript build generates HTML and RSS for
+GitHub Pages. It preserves `reading.michaelmvh.com` and the reader's icons, with independent
+portfolio/reader deployments, DNS-only routing, and no strict legacy URL compatibility.
+The revised implementation is consolidated in [collector/publisher PR #2](https://github.com/michaelmvh/scholarly-rss-feed/pull/2)
+and [reader PR #1](https://github.com/michaelmvh/reading-site/pull/1). Earlier implementation
+drafts are superseded by those branches. Reviewed merges, image publication, and a private
+key-backed NAS rehearsal are still required before cutover. The HTTP deployment instructions
+later in this README describe the existing fallback service.
+
+### Run-once JSON export
+
+The new reader's public contract lives in
+[`reading-site/schema/snapshot-v1.json`](https://github.com/michaelmvh/reading-site/blob/main/schema/snapshot-v1.json).
+This repository owns collection, enrichment, deduplication, identities, and JSON export.
+`reading-site` owns the new reader's TypeScript UX, HTML/RSS rendering, icons, and deployment.
+The existing HTTP server remains available separately as the legacy service.
+
+```sh
+cargo run --locked -- --export /tmp/reading-data-next --config feeds.toml
+```
+
+The destination must be fresh. Subsequent exports use
+`--previous /path/to/last-successful-data` to retain article identities and metadata.
+The exporter writes **only JSON**, never HTML, XML, CSS, JavaScript, or icons:
+
+```text
+snapshot.json       # Schema version, data timestamp, feeds, and shard checksums/counts
+articles/ab.json    # Retained canonical records, bucketed by the first two ID characters
+articles/cd.json
+```
+
+The publisher commits this directory as `reading-site/data/`. Stable sharding avoids one
+ever-growing file and limits unrelated Git changes. Each JSON file is limited to 50 MiB
+and the complete snapshot to 500 MiB. A manifest authenticates the bytes of every shard
+with SHA-256 and describes their expected record counts. It does not provide a cryptographic
+signature or replace access control.
+
+Feed membership and tracked-author associations/defaults are separate from canonical
+article metadata, so two feeds can select the same paper differently. Identifiers retain
+known provider/version aliases. Ambiguous identity merges fail for review rather than
+silently dropping a previously published identity.
+
+Dates retain the source value and collection-added dates remain separate. The current
+provider-neutral model does not expose reliable publication-date precision, so the exporter
+reports `unknown` rather than inferring precision from January 1 or the first of a month.
+The contract also supports explicit day/month/year precision when producers can establish it.
+
+The entire previous JSON snapshot is public metadata, not a private provider cache. Keep
+it backed up. Empty required feeds, unsafe URLs, malformed/checksum-invalid previous data,
+and required source-refresh failures stop publication. Incremental caches and successful
+conditional requests remain supported. Optional enrichment may fail with an explicit log;
+the HTTP service retains its existing stale-cache fallback policy.
+
+The public site URL belongs to the reader build. `--site-url` is no longer accepted here.
+Changing preview/production domains or reader styling does not require recollecting data.
+
+For a synthetic fixture with no provider requests:
+
+```sh
+GSRF_TEST_EXPORT_DIR=/tmp/reading-data-fixture \
+  cargo test --locked export_fixture -- --ignored
+```
+
+CI uploads this JSON fixture. Reader rendering/browser tests now belong to `reading-site`;
+source tests retain the existing HTTP-reader coverage and publisher orchestration coverage.
+Collector CI also pins a compatible reader revision and runs its build/browser checks against
+the actual Rust fixture. Update that pin deliberately when changing the public contract.
+
+For the staged NAS migration, see [the static publication runbook](NAS/STATIC-PUBLISHING.md),
+[`NAS/static-compose.yml`](NAS/static-compose.yml), and
+[`NAS/publisher.env.example`](NAS/publisher.env.example). A separate one-shot publisher
+container includes the Rust exporter, Node.js validation runtime, and Git. It polls GitHub's
+REST API instead of requiring GitHub CLI. No Git/Node/rsync installation, SSH service, or
+Docker socket is needed on the NAS. The existing always-on reader remains separate.
+
+The publisher defaults to `PUBLISH_MODE=prepare`: it generates and validates JSON without
+committing, pushing, or deploying. `PUBLISH_MODE=publish` commits only `data/`, preserves
+concurrent UI commits, and confirms the matching reader build/Pages deploy job. It never
+commits `site/`, `dist/`, reader source, or workflow changes. `SITE_URL` must be removed from
+old publisher configuration; `READER_SITE_URL` is a reader-repository Actions variable.
+A dedicated state mount preserves the checkout, article history, caches, lock, and a
+credential-free `last-run.json`.
+
+GitHub and OpenAlex credentials are read from one read-only `secrets.env` file, based on
+[`NAS/secrets.env.example`](NAS/secrets.env.example). It uses ordinary `KEY=VALUE` syntax,
+but is mounted as a file rather than injected through Compose's `env_file`. The GitHub
+token is scoped to `reading-site`, with Contents read/write and Actions read permission.
+Only Git's child-process environment and GitHub API requests receive that token; the exporter
+environment receives only its OpenAlex key, and npm/validation environments receive neither.
+The mounted credentials file remains within the container's shared trust boundary: use only reviewed
+images and publishing-repository code. Git remotes are checked before use, and tokens are not
+embedded in URLs, generated files, or the image.
+
+The Dockerfile has explicit `server` and `publisher` targets; the default remains `server`.
+GitHub Actions publishes both images for `linux/amd64`. Publisher orchestration is strict
+TypeScript run directly by Node.js 24. Validation installs only the reader repository's
+production dependencies; UI compilation/browser tooling is not run on the NAS.
+Use `npm run typecheck:publisher` and `npm test` for
+local checks. CI also builds the real publisher image and runs its orchestration tests
+with no network, a read-only root filesystem, and no Docker socket.
 
 ## Feed configuration
 
@@ -58,6 +165,20 @@ journals, or topics change.
 Set `GSRF_MAILTO` to a real contact address before production use. OpenAlex uses it for its
 polite API pool; it is sent to OpenAlex but is not included in the RSS feed or baked into the
 container image.
+
+Set `GSRF_OPENALEX_API_KEY` privately for production feeds and static publication. Get a
+verified free key from [OpenAlex Settings](https://openalex.org/settings/api-key); see
+[OpenAlex authentication](https://help.openalex.org/api/authentication/). The contact address
+does not replace authentication. The key is sent only to the HTTPS OpenAlex API as a sensitive
+Authorization header, never as a query parameter or exported metadata. All OpenAlex lookups,
+pagination, and curated enrichment use the same helper.
+
+A bounded single-page feed can still run without a key. Larger feeds may fail with HTTP 401
+when following the first cursor; the full-config local migration rehearsal encountered
+exactly this requirement. Provide the key through a private environment or uncommitted
+Compose `.env`, not a PR, image build argument, public repository, or chat message.
+OpenAlex work pages use the documented 100-result maximum. Rate/budget errors remain
+explicit rather than silently truncating output or retrying indefinitely.
 
 ```toml
 default_feed = "myfield"           # served at bare "/"

@@ -1,4 +1,4 @@
-use crate::discovery::snapshot::DiscoverySnapshot;
+use crate::discovery::snapshot::{DiscoverySnapshot, RefreshPolicy};
 use crate::openalex::{Author, Authorship, Location, Source, Work};
 use crate::provenance::DiscoverySource;
 use chrono::NaiveDate;
@@ -80,8 +80,9 @@ pub async fn fetch_sources(
     client: &reqwest::Client,
     source_names: &[String],
     from: &str,
+    policy: RefreshPolicy,
 ) -> Result<Vec<Work>, String> {
-    Ok(fetch_sources_for_evaluation(client, source_names, from)
+    Ok(fetch_sources_with_policy(client, source_names, from, policy)
         .await?
         .works)
 }
@@ -91,6 +92,15 @@ pub async fn fetch_sources_for_evaluation(
     source_names: &[String],
     from: &str,
 ) -> Result<SourceEvaluation, String> {
+    fetch_sources_with_policy(client, source_names, from, RefreshPolicy::AllowStale).await
+}
+
+async fn fetch_sources_with_policy(
+    client: &reqwest::Client,
+    source_names: &[String],
+    from: &str,
+    policy: RefreshPolicy,
+) -> Result<SourceEvaluation, String> {
     validate_sources(source_names)?;
     let mut works = Vec::new();
     let mut diagnostics = Vec::new();
@@ -98,7 +108,7 @@ pub async fn fetch_sources_for_evaluation(
     for source_name in source_names {
         match source_name.as_str() {
             PELDOM_PROTEIN_DESIGN => {
-                let snapshot = fetch_peldom(client).await?;
+                let snapshot = fetch_peldom(client, policy).await?;
                 works.extend(snapshot.works);
                 diagnostics.push(snapshot.diagnostics);
             }
@@ -136,14 +146,18 @@ fn parse_date(value: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(value, "%Y-%m-%d").ok()
 }
 
-async fn fetch_peldom(client: &reqwest::Client) -> Result<Snapshot, String> {
-    if let Some(snapshot) = fresh_snapshot() {
-        return Ok(snapshot);
+async fn fetch_peldom(client: &reqwest::Client, policy: RefreshPolicy) -> Result<Snapshot, String> {
+    if policy == RefreshPolicy::AllowStale {
+        if let Some(snapshot) = fresh_snapshot() {
+            return Ok(snapshot);
+        }
     }
 
     let _refresh_guard = PELDOM_REFRESH.lock().await;
-    if let Some(snapshot) = fresh_snapshot() {
-        return Ok(snapshot);
+    if policy == RefreshPolicy::AllowStale {
+        if let Some(snapshot) = fresh_snapshot() {
+            return Ok(snapshot);
+        }
     }
 
     let cached = PELDOM_SNAPSHOT
@@ -153,6 +167,7 @@ async fn fetch_peldom(client: &reqwest::Client) -> Result<Snapshot, String> {
     match refresh_peldom(client, cached.as_ref()).await {
         Ok(snapshot) => {
             if let Err(error) = persist_snapshot(&snapshot) {
+                policy.check_failure(&error)?;
                 eprintln!("{error}");
             }
             *PELDOM_SNAPSHOT.write() = Some(snapshot.clone());
@@ -160,6 +175,7 @@ async fn fetch_peldom(client: &reqwest::Client) -> Result<Snapshot, String> {
         }
         Err(error) => match cached {
             Some(mut snapshot) => {
+                policy.check_failure(&error)?;
                 eprintln!("{error}; using the last successfully parsed Peldom snapshot");
                 snapshot.checked_at = Instant::now();
                 *PELDOM_SNAPSHOT.write() = Some(snapshot.clone());

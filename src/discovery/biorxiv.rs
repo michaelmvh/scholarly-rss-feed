@@ -1,5 +1,5 @@
 use crate::discovery::snapshot::{
-    resolve_refresh, DiscoverySnapshot, RefreshBatch, RefreshOutcome,
+    resolve_refresh, DiscoverySnapshot, RefreshBatch, RefreshOutcome, RefreshPolicy,
 };
 use crate::openalex::{Author, Authorship, Location, Source, Work};
 use crate::provenance::DiscoverySource;
@@ -73,13 +73,14 @@ pub async fn fetch_categories(
     client: &reqwest::Client,
     categories: &[String],
     retention_from: &str,
+    policy: RefreshPolicy,
 ) -> Result<Vec<Work>, String> {
     validate_categories(categories)?;
     let mut works = Vec::new();
     for category in categories {
         works = merge_works(
             works,
-            fetch_category(client, category, retention_from).await?,
+            fetch_category(client, category, retention_from, policy).await?,
         );
     }
     Ok(works)
@@ -89,6 +90,7 @@ async fn fetch_category(
     client: &reqwest::Client,
     category: &str,
     retention_from: &str,
+    policy: RefreshPolicy,
 ) -> Result<Vec<Work>, String> {
     let _refresh_guard = REFRESH_LOCK.lock().await;
     let source_key = format!("biorxiv:{category}");
@@ -136,6 +138,7 @@ async fn fetch_category(
             snapshot.into_works_since(retention_from)
         }
         RefreshOutcome::Stale { snapshot, error } => {
+            policy.check_failure(&error)?;
             eprintln!("{error}; using the last successful {category} bioRxiv snapshot");
             snapshot.into_works_since(retention_from)
         }

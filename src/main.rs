@@ -9,6 +9,7 @@ mod openalex_enrichment;
 mod provenance;
 mod reader;
 mod snapshot_store;
+mod data_export;
 mod works;
 
 use crate::config::{Config, FeedConfig};
@@ -68,7 +69,7 @@ static CONFIG_PATH: OnceLock<PathBuf> = OnceLock::new();
 const DEFAULT_FROM_DAYS: u32 = 365;
 const DEFAULT_NATIVE_FROM_DAYS: u32 = 7;
 const DEFAULT_MAX_OPENALEX_WORKS: usize = 20_000;
-const OPENALEX_PAGE_SIZE: usize = 200;
+const OPENALEX_PAGE_SIZE: usize = 100;
 const MAX_CONCURRENT_CONNECTIONS: usize = 64;
 const MAX_CONCURRENT_FEED_BUILDS: usize = 8;
 const MAX_GENERATED_FEEDS: usize = 128;
@@ -173,6 +174,7 @@ struct CliArgs {
     address: String,
     config_path: PathBuf,
     comparison: Option<ComparisonArgs>,
+    export: Option<data_export::ExportArgs>,
 }
 
 struct ComparisonArgs {
@@ -272,6 +274,14 @@ async fn main() {
     };
     CONFIG_PATH.set(cli.config_path.clone()).ok();
 
+    if let Some(export) = cli.export {
+        if let Err(error) = data_export::run(&export, &cli.config_path).await {
+            eprintln!("Data export failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     if let Some(comparison) = cli.comparison {
         if let Err(error) = run_curated_comparison(&comparison, &cli.config_path).await {
             eprintln!("{error}");
@@ -331,15 +341,25 @@ async fn main() {
 
 /// Parse CLI args: first non-flag positional is the bind address, `--config <path>`
 /// selects the feeds config file, and `--compare-curated <feed> <source>` runs
-/// an evaluation instead of the server.
+/// an evaluation instead of the server. `--export <directory>` emits JSON data;
+/// `--previous <directory>` supplies the prior retained data snapshot.
 fn parse_cli_args_from(args: impl IntoIterator<Item = String>) -> Result<CliArgs, String> {
     let mut address: Option<String> = None;
     let mut config: Option<String> = None;
     let mut comparison = None;
+    let mut export_dir = None;
+    let mut previous_dir = None;
 
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--export" | "--previous" => {
+                let value = args.next().ok_or_else(|| format!("{arg} requires a value"))?;
+                match arg.as_str() {
+                    "--export" => export_dir = Some(PathBuf::from(value)),
+                    _ => previous_dir = Some(PathBuf::from(value)),
+                }
+            }
             "--config" => {
                 config = Some(
                     args.next()
@@ -371,6 +391,13 @@ fn parse_cli_args_from(args: impl IntoIterator<Item = String>) -> Result<CliArgs
         }
     }
 
+    if export_dir.is_none() && previous_dir.is_some() {
+        return Err("--previous requires --export.".to_string());
+    }
+    if export_dir.is_some() && (comparison.is_some() || address.is_some()) {
+        return Err("--export cannot be combined with a server address or --compare-curated.".to_string());
+    }
+    let export = export_dir.map(|output| data_export::ExportArgs::new(output, previous_dir));
     let address = address.unwrap_or_else(|| "127.0.0.1:3005".to_string());
     let config = config
         .or_else(|| env::var("GSRF_CONFIG").ok())
@@ -380,6 +407,7 @@ fn parse_cli_args_from(args: impl IntoIterator<Item = String>) -> Result<CliArgs
         address,
         config_path: PathBuf::from(config),
         comparison,
+        export,
     })
 }
 
@@ -1144,8 +1172,7 @@ async fn resolve_orcid(orcid: &str) -> Result<Option<String>, String> {
     if let Some(m) = mailto() {
         url.query_pairs_mut().append_pair("mailto", &m);
     }
-    let response = CLIENT
-        .get(url)
+    let response = openalex::request(&CLIENT, url)?
         .send()
         .await
         .map_err(|error| format!("OpenAlex ORCID lookup failed: {error}"))?;
@@ -1175,8 +1202,7 @@ async fn resolve_author_name(name: &str) -> Result<Option<(String, String)>, Str
     }
     let url = url::Url::parse_with_params(&format!("{API_BASE}/authors"), &pairs)
         .map_err(|error| format!("Failed to build OpenAlex author search URL: {error}"))?;
-    let response = CLIENT
-        .get(url)
+    let response = openalex::request(&CLIENT, url)?
         .send()
         .await
         .map_err(|error| format!("OpenAlex author search failed: {error}"))?
@@ -1205,8 +1231,7 @@ async fn resolve_issn(issn: &str) -> Result<Option<String>, String> {
     if let Some(m) = mailto() {
         url.query_pairs_mut().append_pair("mailto", &m);
     }
-    let response = CLIENT
-        .get(url)
+    let response = openalex::request(&CLIENT, url)?
         .send()
         .await
         .map_err(|error| format!("OpenAlex ISSN lookup failed: {error}"))?;
@@ -1236,8 +1261,7 @@ async fn resolve_journal_name(name: &str) -> Result<Option<(String, String)>, St
     }
     let url = url::Url::parse_with_params(&format!("{API_BASE}/sources"), &pairs)
         .map_err(|error| format!("Failed to build OpenAlex journal search URL: {error}"))?;
-    let response = CLIENT
-        .get(url)
+    let response = openalex::request(&CLIENT, url)?
         .send()
         .await
         .map_err(|error| format!("OpenAlex journal search failed: {error}"))?
@@ -1339,6 +1363,13 @@ fn oldest_cache_key(channels: &HashMap<FeedCacheKey, CachedFeed>) -> Option<Feed
 }
 
 async fn build_feed(request: &FeedRequest) -> Result<GeneratedFeed, String> {
+    build_feed_with_policy(request, discovery::snapshot::RefreshPolicy::AllowStale).await
+}
+
+async fn build_feed_with_policy(
+    request: &FeedRequest,
+    policy: discovery::snapshot::RefreshPolicy,
+) -> Result<GeneratedFeed, String> {
     println!(
         "Building RSS channel for authors [{}] journals [{}] curated sources [{}] from {}",
         request.author_ids.join(", "),
@@ -1367,7 +1398,7 @@ async fn build_feed(request: &FeedRequest) -> Result<GeneratedFeed, String> {
         .categories(vec![Category::from("Scientific Research")])
         .build();
 
-    let works = fetch_works(request).await?;
+    let works = fetch_works(request, policy).await?;
     let items = works.iter().map(work_to_item).collect::<Vec<_>>();
     channel.set_items(items);
 
@@ -1375,6 +1406,14 @@ async fn build_feed(request: &FeedRequest) -> Result<GeneratedFeed, String> {
     channel.set_pub_date(now.clone());
     channel.set_last_build_date(now);
 
+    Ok(GeneratedFeed {
+        channel,
+        reader: reader_feed_from_works(request, &works),
+    })
+}
+
+fn reader_feed_from_works(request: &FeedRequest, works: &[Work]) -> reader::Feed {
+    let (title, description) = channel_metadata(request);
     let publications = works
         .iter()
         .map(|work| work_to_publication(work, &request.people))
@@ -1422,15 +1461,7 @@ async fn build_feed(request: &FeedRequest) -> Result<GeneratedFeed, String> {
         }
     }));
 
-    Ok(GeneratedFeed {
-        channel,
-        reader: reader::Feed {
-            title,
-            description,
-            publications,
-            paper_sources,
-        },
-    })
+    reader::Feed { title, description, publications, paper_sources }
 }
 
 fn channel_metadata(request: &FeedRequest) -> (String, String) {
@@ -1473,19 +1504,21 @@ fn channel_metadata(request: &FeedRequest) -> (String, String) {
     (title, description)
 }
 
-async fn fetch_works(request: &FeedRequest) -> Result<Vec<Work>, String> {
+async fn fetch_works(request: &FeedRequest, policy: discovery::snapshot::RefreshPolicy) -> Result<Vec<Work>, String> {
     let (provider_works, curated_works, biorxiv_works, arxiv_works) = tokio::join!(
         fetch_provider_works(request),
-        curated::fetch_sources(&CLIENT, &request.curated_sources, &request.from),
+        curated::fetch_sources(&CLIENT, &request.curated_sources, &request.from, policy),
         discovery::biorxiv::fetch_categories(
             &CLIENT,
             &request.biorxiv_categories,
             &request.native_from,
+            policy,
         ),
         discovery::arxiv::fetch_categories(
             &CLIENT,
             &request.arxiv_categories,
             &request.native_from,
+            policy,
         ),
     );
     let mut provider_works = provider_works?;
@@ -1629,13 +1662,12 @@ async fn fetch_works_for_filter_from(
         }
         let url = url::Url::parse_with_params(&format!("{api_base}/works"), &pairs)
             .map_err(|error| format!("Failed to build OpenAlex URL: {error}"))?;
-        let response = client
-            .get(url)
+        let response = openalex::request(client, url)?
             .send()
             .await
-            .map_err(|error| format!("OpenAlex request failed: {error}"))?
+            .map_err(openalex::request_error)?
             .error_for_status()
-            .map_err(|error| format!("OpenAlex request failed: {error}"))?;
+            .map_err(openalex::request_error)?;
         let mut body = response
             .json::<WorksResponse>()
             .await
@@ -2950,7 +2982,7 @@ optional = true
         assert!(requests[1].contains("cursor=next-page"));
         assert!(requests
             .iter()
-            .all(|request| request.contains("per_page=200")));
+            .all(|request| request.contains("per_page=100")));
     }
 
     #[tokio::test]

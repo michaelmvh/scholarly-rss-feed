@@ -1,0 +1,104 @@
+name: Check collector and JSON publication
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: cargo test --locked
+      - run: npm ci
+      - run: npm run typecheck:publisher
+      - run: npm run check:publisher-compose
+      - run: npm test
+      - run: sh -n publisher/git-askpass.sh
+      - name: Generate synthetic JSON snapshot
+        run: cargo test --locked export_fixture -- --ignored
+        env:
+          GSRF_TEST_EXPORT_DIR: ${{ runner.temp }}/article-data
+      - name: Check out the compatible reader contract and build
+        uses: actions/checkout@v4
+        with:
+          repository: michaelmvh/reading-site
+          ref: 488c8cfb027040bae1e43703d8066566cb35c07c
+          path: reader-contract
+          persist-credentials: false
+      - run: npm ci --ignore-scripts
+        working-directory: reader-contract
+      - name: Build the reader from actual Rust output
+        working-directory: reader-contract
+        run: npm run build
+        env:
+          DATA_DIR: ${{ runner.temp }}/article-data
+          SITE_URL: http://127.0.0.1:8080/
+      - run: npx playwright install --with-deps chromium
+        working-directory: reader-contract
+      - run: npm run test:browser
+        working-directory: reader-contract
+      - uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-article-data
+          path: ${{ runner.temp }}/article-data
+          if-no-files-found: error
+
+  publisher-container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: publisher
+          load: true
+          tags: reading-publisher:test
+          cache-from: type=gha,scope=publisher-ci
+          cache-to: type=gha,mode=max,scope=publisher-ci
+      - name: Check publisher image without a network or Docker socket
+        run: |
+          docker run --rm --network none --read-only --cap-drop ALL --cap-add DAC_OVERRIDE \
+            --security-opt no-new-privileges --tmpfs /tmp reading-publisher:test --help
+          if output=$(docker run --rm --network none --read-only --cap-drop ALL --cap-add DAC_OVERRIDE \
+            --security-opt no-new-privileges --tmpfs /tmp --entrypoint scholarly-rss-feed \
+            reading-publisher:test --export /tmp/data \
+            --config /tmp/missing-feeds.toml 2>&1); then
+            echo "Missing exporter configuration unexpectedly succeeded."
+            exit 1
+          fi
+          printf '%s\n' "$output" | grep -F 'Data export requires a configured default_feed.'
+          docker run --rm --network none --read-only --cap-drop ALL --cap-add DAC_OVERRIDE \
+            --security-opt no-new-privileges --tmpfs /tmp \
+            -v "$PWD:/project:ro" -w /project --entrypoint node \
+            reading-publisher:test --test tests/publisher.test.mts
+      - name: Check private DSM-style bind mount permissions
+        run: |
+          private="$RUNNER_TEMP/publisher-private"
+          mkdir -m 700 "$private"
+          mkdir -m 700 "$private/state"
+          printf 'PUBLISH_GITHUB_TOKEN=fixture-github\nGSRF_OPENALEX_API_KEY=fixture-openalex\n' > "$private/secrets.env"
+          chmod 600 "$private/secrets.env"
+          docker run --rm --network none --read-only --cap-drop ALL --cap-add DAC_OVERRIDE \
+            --security-opt no-new-privileges --tmpfs /tmp \
+            -v "$private/state:/state" \
+            -v "$private/secrets.env:/run/secrets/credentials:ro" \
+            --entrypoint node reading-publisher:test --input-type=module -e '
+              import { loadConfig } from "/opt/publisher/main.mts";
+              import { mkdir } from "node:fs/promises";
+              await loadConfig({
+                PUBLISH_GIT_NAME: "Fixture",
+                PUBLISH_GIT_EMAIL: "fixture@example.org",
+                GSRF_MAILTO: "fixture@example.org"
+              });
+              await mkdir("/state/probe");
+            '
