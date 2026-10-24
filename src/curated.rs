@@ -12,7 +12,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub const PELDOM_PROTEIN_DESIGN: &str = "peldom-protein-design";
+pub const NANOPORE_FOUNDATIONS: &str = "nanopore-foundations";
 
+const NANOPORE_FOUNDATIONS_NAME: &str = "Nanopore Foundations & Signal Analysis";
+const NANOPORE_FOUNDATIONS_URL: &str = "https://github.com/Michaelmvh/scholarly-rss-feed/blob/main/src/curated/nanopore-foundations.json";
 const PELDOM_README_URL: &str =
     "https://raw.githubusercontent.com/Peldom/papers_for_protein_design_using_DL/main/README.md";
 const PELDOM_REPOSITORY_URL: &str = "https://github.com/Peldom/papers_for_protein_design_using_DL";
@@ -62,7 +65,7 @@ pub struct SourceEvaluation {
 
 pub fn validate_sources(source_names: &[String]) -> Result<(), String> {
     for source_name in source_names {
-        if source_name != PELDOM_PROTEIN_DESIGN {
+        if source_details(source_name).is_none() {
             return Err(format!("Unknown curated source \"{source_name}\"."));
         }
     }
@@ -72,6 +75,7 @@ pub fn validate_sources(source_names: &[String]) -> Result<(), String> {
 pub fn source_details(source_name: &str) -> Option<(&'static str, &'static str)> {
     match source_name {
         PELDOM_PROTEIN_DESIGN => Some((PELDOM_SOURCE_NAME, PELDOM_REPOSITORY_URL)),
+        NANOPORE_FOUNDATIONS => Some((NANOPORE_FOUNDATIONS_NAME, NANOPORE_FOUNDATIONS_URL)),
         _ => None,
     }
 }
@@ -112,6 +116,16 @@ async fn fetch_sources_with_policy(
                 works.extend(snapshot.works);
                 diagnostics.push(snapshot.diagnostics);
             }
+            NANOPORE_FOUNDATIONS => {
+                let papers = nanopore_foundations()?;
+                diagnostics.push(SourceDiagnostics {
+                    source_name: NANOPORE_FOUNDATIONS.to_string(),
+                    entries_seen: papers.len(),
+                    accepted: papers.len(),
+                    ..SourceDiagnostics::default()
+                });
+                works.extend(papers);
+            }
             _ => unreachable!("curated sources were validated"),
         }
     }
@@ -119,6 +133,24 @@ async fn fetch_sources_with_policy(
     filter_from(&mut works, from)?;
 
     Ok(SourceEvaluation { works, diagnostics })
+}
+
+fn nanopore_foundations() -> Result<Vec<Work>, String> {
+    let mut works: Vec<Work> =
+        serde_json::from_str(include_str!("curated/nanopore-foundations.json"))
+            .map_err(|error| format!("Invalid nanopore foundations collection: {error}"))?;
+    for work in &mut works {
+        let doi = work.doi.as_deref().ok_or_else(|| {
+            format!("Nanopore foundations paper lacks a DOI: {}", work.best_title())
+        })?;
+        work.id = Some(format!("doi:{}", crate::works::normalize_doi(doi)));
+        work.add_discovery_source(DiscoverySource::curated_collection(
+            NANOPORE_FOUNDATIONS.to_string(),
+            NANOPORE_FOUNDATIONS_NAME.to_string(),
+            NANOPORE_FOUNDATIONS_URL.to_string(),
+        ));
+    }
+    Ok(works)
 }
 
 fn filter_from(works: &mut Vec<Work>, from: &str) -> Result<(), String> {
@@ -890,8 +922,77 @@ Example Author
 
     #[test]
     fn validates_registered_source_names() {
-        assert!(validate_sources(&[PELDOM_PROTEIN_DESIGN.to_string()]).is_ok());
+        assert!(validate_sources(&[
+            PELDOM_PROTEIN_DESIGN.to_string(),
+            NANOPORE_FOUNDATIONS.to_string(),
+        ])
+        .is_ok());
         assert!(validate_sources(&["unknown".to_string()]).is_err());
+    }
+
+    #[tokio::test]
+    async fn foundations_preserve_methods_and_landmarks_without_network_discovery() {
+        let works = fetch_sources(
+            &reqwest::Client::new(),
+            &[NANOPORE_FOUNDATIONS.to_string()],
+            "1900-01-01",
+            RefreshPolicy::RequireFresh,
+        )
+        .await
+        .unwrap();
+        let identifiers = works
+            .iter()
+            .map(|work| work.id.clone().unwrap())
+            .collect::<HashSet<_>>();
+        assert_eq!(identifiers.len(), works.len());
+        for doi in [
+            "10.1093/bioinformatics/btv046",
+            "10.1093/gigascience/giy037",
+            "10.1371/journal.pone.0178751",
+            "10.1038/s41586-024-07935-7",
+            "10.64898/2026.01.08.698148",
+            "10.64898/2026.05.19.726067",
+            "10.21203/rs.3.rs-8098579/v1",
+        ] {
+            assert!(identifiers.contains(&format!("doi:{doi}")), "{doi}");
+        }
+        for work in &works {
+            assert!(parse_date(work.publication_date.as_deref().unwrap()).is_some());
+            assert!(!work.author_names().is_empty());
+            assert!(!work.curated_categories.is_empty());
+            assert_eq!(work.discovery_sources[0].key, NANOPORE_FOUNDATIONS);
+        }
+
+        let mut protein_only = works.clone();
+        crate::nanopore::retain_relevant(&mut protein_only);
+        assert!(protein_only.len() < works.len());
+        assert!(!protein_only.iter().any(|work| {
+            work.doi.as_deref() == Some("https://doi.org/10.1093/gigascience/giy037")
+        }));
+
+        let recent = fetch_sources(
+            &reqwest::Client::new(),
+            &[NANOPORE_FOUNDATIONS.to_string()],
+            "2026-01-01",
+            RefreshPolicy::RequireFresh,
+        )
+        .await
+        .unwrap();
+        assert!(!recent.is_empty());
+        assert!(recent.len() < works.len());
+        assert!(recent
+            .iter()
+            .all(|work| work.publication_date.as_deref().unwrap() >= "2026-01-01"));
+
+        let mut enriched = works[0].clone();
+        enriched.id = Some("https://openalex.org/W123".into());
+        enriched.discovery_sources = vec![DiscoverySource::openalex()];
+        let merged = crate::works::merge_works(vec![enriched], works);
+        assert_eq!(merged.len(), identifiers.len());
+        assert!(merged.iter().any(|work| {
+            work.discovery_sources.iter().any(|source| source.key == "openalex")
+                && work.discovery_sources.iter().any(|source| source.key == NANOPORE_FOUNDATIONS)
+        }));
     }
 
     #[test]
