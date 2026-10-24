@@ -642,6 +642,37 @@ mod tests {
         input
     }
 
+    fn doi_alias_input() -> Input {
+        let enriched: crate::openalex::Work = serde_json::from_value(serde_json::json!({
+            "id": "https://openalex.org/W-fixture",
+            "doi": "https://doi.org/10.1000/published",
+            "title": "Published paper",
+            "alternate_links": ["https://doi.org/10.1000/preprint"],
+            "best_oa_location": {"pdf_url": "https://example.org/published.pdf"}
+        })).unwrap();
+        let mut curated: crate::openalex::Work = serde_json::from_value(serde_json::json!({
+            "id": "curated:preprint",
+            "doi": "https://doi.org/10.1000/preprint",
+            "title": "Earlier preprint title"
+        })).unwrap();
+        curated.add_discovery_source(DiscoverySource::curated_collection(
+            "example".to_string(), "Example collection".to_string(), "https://example.org".to_string(),
+        ));
+        let works = crate::works::merge_works(vec![enriched], vec![curated]);
+        assert_eq!(works.len(), 1);
+        let work = &works[0];
+        let mut input = sample("doi-alias", false);
+        input.keys = vec![work.id.iter().chain(&work.doi).chain(&work.alternate_links).cloned().collect()];
+        input.feed.publications = vec![crate::work_to_publication(work, &[])];
+        input.feed.paper_sources = vec![PaperSourceOption {
+            value: "curated:example".to_string(),
+            label: "Example collection".to_string(),
+            group: "Core feed",
+            selected: true,
+        }];
+        input
+    }
+
     #[test]
     fn punctuation_only_enriched_byline_does_not_abort_export() {
         let output = directory();
@@ -752,7 +783,10 @@ mod tests {
         export(
             &ExportArgs::new(output, None),
             "example",
-            BTreeMap::from([("example".to_string(), input)]),
+            BTreeMap::from([
+                ("example".to_string(), input),
+                ("archive".to_string(), doi_alias_input()),
+            ]),
         )
         .unwrap();
     }

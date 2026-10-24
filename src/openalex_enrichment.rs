@@ -1,7 +1,8 @@
-use crate::openalex::{Work, WorksResponse, API_BASE};
-use crate::works::{mark_feed_authors, merge_works};
+use crate::openalex::{Work, API_BASE};
+use crate::works::{doi_identifiers, mark_feed_authors, merge_works, normalize_doi};
 use lazy_static::lazy_static;
 use parking_lot::RwLock;
+use serde::Deserialize;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -20,6 +21,24 @@ struct EnrichmentSnapshot {
     checked_at: Instant,
     identifiers: HashSet<String>,
     works: Vec<Work>,
+}
+
+#[derive(Deserialize)]
+struct EnrichmentResponse {
+    results: Vec<EnrichedWork>,
+}
+
+#[derive(Deserialize)]
+struct EnrichedWork {
+    #[serde(flatten)]
+    work: Work,
+    #[serde(default)]
+    locations: Vec<LocationDoi>,
+}
+
+#[derive(Deserialize)]
+struct LocationDoi {
+    doi: Option<String>,
 }
 
 pub async fn enrich(
@@ -61,6 +80,19 @@ fn merge_enriched(
     mut curated: Vec<Work>,
     tracked_author_ids: &[String],
 ) -> Vec<Work> {
+    let identifiers = stable_identifiers(&curated);
+    enriched.retain(|work| {
+        let matched = doi_identifiers(work)
+            .iter()
+            .any(|doi| identifiers.contains(doi));
+        if !matched {
+            eprintln!(
+                "Ignoring unmatched OpenAlex enrichment record {:?}; preserving original curated records",
+                work.id
+            );
+        }
+        matched
+    });
     mark_feed_authors(&mut enriched, tracked_author_ids);
     mark_feed_authors(&mut curated, tracked_author_ids);
     merge_works(enriched, curated)
@@ -81,42 +113,16 @@ fn works_for_identifiers(works: &[Work], identifiers: &HashSet<String>) -> Vec<W
     works
         .iter()
         .filter(|work| {
-            work.doi
-                .as_deref()
-                .map(normalize_doi)
-                .is_some_and(|doi| identifiers.contains(&doi))
+            doi_identifiers(work)
+                .iter()
+                .any(|doi| identifiers.contains(doi))
         })
         .cloned()
         .collect()
 }
 
 fn stable_identifiers(works: &[Work]) -> HashSet<String> {
-    works
-        .iter()
-        .filter_map(|work| {
-            work.doi
-                .as_deref()
-                .map(normalize_doi)
-                .or_else(|| {
-                    work.id
-                        .as_deref()
-                        .and_then(|id| id.strip_prefix("arxiv:"))
-                        .map(|id| format!("10.48550/arxiv.{id}"))
-                })
-                .filter(|identifier| !identifier.is_empty())
-        })
-        .collect()
-}
-
-fn normalize_doi(value: &str) -> String {
-    value
-        .trim()
-        .to_ascii_lowercase()
-        .trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .trim_start_matches("doi.org/")
-        .trim_start_matches("doi:")
-        .to_string()
+    works.iter().flat_map(doi_identifiers).collect()
 }
 
 async fn fetch_batch(
@@ -163,14 +169,110 @@ async fn fetch_batch(
         }
         body.extend_from_slice(&chunk);
     }
-    serde_json::from_slice::<WorksResponse>(&body)
-        .map(|response| response.results)
-        .map_err(|error| format!("Failed to parse OpenAlex enrichment response: {error}"))
+    parse_enrichment_response(&body)
+}
+
+fn parse_enrichment_response(body: &[u8]) -> Result<Vec<Work>, String> {
+    let response: EnrichmentResponse = serde_json::from_slice(body)
+        .map_err(|error| format!("Failed to parse OpenAlex enrichment response: {error}"))?;
+    response
+        .results
+        .into_iter()
+        .map(|mut record| {
+            for doi in record.locations.into_iter().filter_map(|location| location.doi) {
+                let doi = normalize_doi(&doi);
+                if !doi.starts_with("10.") || !doi.contains('/') || doi.contains(char::is_whitespace) {
+                    return Err(format!(
+                        "Invalid OpenAlex location DOI for record {:?}",
+                        record.work.id
+                    ));
+                }
+                record.work.alternate_links.push(format!("https://doi.org/{doi}"));
+            }
+            record.work.alternate_links.sort();
+            record.work.alternate_links.dedup();
+            Ok(record.work)
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provenance::DiscoverySource;
+
+    #[test]
+    fn location_doi_aliases_preserve_curated_provenance_across_published_versions() {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "results": [{
+                "id": "https://openalex.org/W4416808855",
+                "doi": "https://doi.org/10.1038/s42003-026-10497-1",
+                "title": "Ovo, an open-source ecosystem for de novo protein design",
+                "authorships": [{"author": {"display_name": "Published Author"}}],
+                "best_oa_location": {"pdf_url": "https://example.org/published.pdf"},
+                "locations": [
+                    {"doi": "https://doi.org/10.1038/s42003-026-10497-1"},
+                    {"doi": "https://doi.org/10.1101/2025.11.27.691041"},
+                    {"doi": "https://doi.org/10.1101/2025.11.27.691041"},
+                    {"doi": null}
+                ]
+            }]
+        }))
+        .unwrap();
+        let enriched = parse_enrichment_response(&body).unwrap();
+        assert_eq!(enriched[0].alternate_links.len(), 2);
+        let mut curated: Work = serde_json::from_value(serde_json::json!({
+            "id": "doi:10.1101/2025.11.27.691041",
+            "doi": "https://doi.org/10.1101/2025.11.27.691041",
+            "title": "A different preprint title",
+            "authorships": [{"raw_author_name": "Preprint Author"}],
+            "curated_categories": ["Protein design"]
+        }))
+        .unwrap();
+        let source = DiscoverySource::curated_collection(
+            "example".to_string(), "Example".to_string(), "https://example.org/".to_string(),
+        );
+        curated.add_discovery_source(source.clone());
+        let identifiers = stable_identifiers(&[curated.clone()]);
+        let cached = works_for_identifiers(&enriched, &identifiers);
+        assert_eq!(cached.len(), 1);
+        for candidate in [enriched, cached] {
+            let merged = merge_enriched(candidate, vec![curated.clone()], &[]);
+            assert_eq!(merged.len(), 1);
+            assert_eq!(merged[0].id.as_deref(), Some("https://openalex.org/W4416808855"));
+            assert_eq!(merged[0].discovery_sources, vec![source.clone()]);
+            assert_eq!(merged[0].curated_categories, vec!["Protein design"]);
+            assert!(doi_identifiers(&merged[0]).contains(&"10.1101/2025.11.27.691041".to_string()));
+        }
+    }
+
+    #[test]
+    fn unmatched_enrichment_cannot_add_an_unattributed_paper() {
+        let curated: Work = serde_json::from_value(serde_json::json!({
+            "id": "curated:original",
+            "doi": "https://doi.org/10.1000/original",
+            "title": "Original"
+        }))
+        .unwrap();
+        let candidate: Work = serde_json::from_value(serde_json::json!({
+            "id": "W-unrelated",
+            "doi": "https://doi.org/10.1000/unrelated",
+            "title": "Unrelated enrichment result"
+        }))
+        .unwrap();
+        let merged = merge_enriched(vec![candidate], vec![curated], &[]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].id.as_deref(), Some("curated:original"));
+    }
+
+    #[test]
+    fn invalid_location_doi_is_reported_with_record_context() {
+        let error = parse_enrichment_response(br#"{
+            "results": [{"id": "W1", "locations": [{"doi": "not a doi"}]}]
+        }"#).unwrap_err();
+        assert!(error.contains("Invalid OpenAlex location DOI"));
+        assert!(error.contains("W1"));
+    }
 
     #[test]
     fn derives_openalex_doi_filters_without_title_matching() {
