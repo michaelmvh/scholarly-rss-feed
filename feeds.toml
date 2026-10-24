@@ -124,10 +124,8 @@ from_days = 7
 biorxiv_categories = ["synthetic_biology", "bioinformatics"]
 arxiv_categories = ["q-bio.BM", "q-bio.QM"]
 
-# A journal-only feed: recent papers from specific journals, no authors required.
-[feeds.top-journals]
-title = "Top Journals"
-source_ids = ["S137773608", "S64187185"]  # Nature, Nature Communications
+# Journal-wide collection is disabled; tracked-author searches still include
+# their Nature and Nature Communications papers.
 
 [feeds.protein-design-archive]
 title = "Deep Learning for Protein Design"
