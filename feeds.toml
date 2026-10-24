@@ -133,3 +133,13 @@ source_ids = ["S137773608", "S64187185"]  # Nature, Nature Communications
 title = "Deep Learning for Protein Design"
 from = "1900-01-01"
 curated_sources = ["peldom-protein-design"]
+
+[feeds.protein-nanopores]
+title = "Protein Nanopores & Protein Sequencing"
+from_days = 365
+search_queries = ['(nanopore OR "nano-pore" OR aerolysin OR "alpha-hemolysin" OR MspA) AND (protein OR peptide OR polypeptide OR "amino acid" OR unfoldase OR ClpX)']
+relevance_filter = "protein_nanopore"
+
+[[feeds.protein-nanopores.people]]
+name = "Jeff Nivala"
+openalex_id = "A5005023517"

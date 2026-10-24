@@ -6,13 +6,14 @@ mod github_history;
 mod google_scholar;
 mod openalex;
 mod openalex_enrichment;
+mod nanopore;
 mod provenance;
 mod reader;
 mod snapshot_store;
 mod data_export;
 mod works;
 
-use crate::config::{Config, FeedConfig};
+use crate::config::{Config, FeedConfig, RelevanceFilter};
 use crate::openalex::{
     normalize_id, Author, AuthorsResponse, SourceRecord, SourcesResponse, Work,
     API_BASE,
@@ -197,6 +198,8 @@ struct FeedCacheKey {
     from: String,
     native_from: String,
     topics: Vec<String>,
+    search_queries: Vec<String>,
+    relevance_filter: Option<RelevanceFilter>,
     include_core: bool,
     core_available: bool,
     available_curated_sources: Vec<String>,
@@ -230,6 +233,8 @@ struct FeedRequest {
     native_from: String,
     /// Sorted OpenAlex topic ids.
     topics: Vec<String>,
+    search_queries: Vec<String>,
+    relevance_filter: Option<RelevanceFilter>,
     /// Whether the configured author/journal provider side is included.
     include_core: bool,
     /// Whether this feed has a configured or ad-hoc provider side available.
@@ -256,6 +261,8 @@ impl FeedRequest {
             from: self.from.clone(),
             native_from: self.native_from.clone(),
             topics: self.topics.clone(),
+            search_queries: self.search_queries.clone(),
+            relevance_filter: self.relevance_filter,
             include_core: self.include_core,
             core_available: self.core_available,
             available_curated_sources: self.available_curated_sources.clone(),
@@ -833,6 +840,20 @@ async fn resolve_feed_request(
 
     let empty = FeedConfig::default();
     let feed = feed.unwrap_or(&empty);
+    if feed.search_queries.len() > 4
+        || feed.search_queries.iter().any(|query| {
+            query.trim().is_empty() || query.len() > 512 || query.chars().any(char::is_control)
+        })
+    {
+        return Err(ResolveFeedError::InvalidRequest(
+            "Configure at most four nonempty OpenAlex search_queries, each at most 512 bytes without control characters.".to_string(),
+        ));
+    }
+    if provider != Provider::OpenAlex && !feed.search_queries.is_empty() {
+        return Err(ResolveFeedError::InvalidRequest(
+            "search_queries require the OpenAlex provider.".to_string(),
+        ));
+    }
     let from = adhoc_from
         .or_else(|| feed.from.clone())
         .unwrap_or_else(|| default_from_date(feed.from_days.or(config.settings.from_days)));
@@ -844,6 +865,7 @@ async fn resolve_feed_request(
         || !feed.source_ids.is_empty()
         || !feed.issns.is_empty()
         || !feed.journals.is_empty()
+        || !feed.search_queries.is_empty()
         || has_adhoc;
     let include_core = !custom_paper_sources
         || selected_paper_sources
@@ -1003,6 +1025,8 @@ async fn resolve_feed_request(
             from,
             native_from,
             topics: Vec::new(),
+            search_queries: Vec::new(),
+            relevance_filter: feed.relevance_filter,
             include_core,
             core_available,
             available_curated_sources,
@@ -1086,9 +1110,17 @@ async fn resolve_feed_request(
     source_ids.sort();
     source_ids.dedup();
 
-    // A feed needs at least one author or journal to produce anything.
+    let mut search_queries = if include_core {
+        feed.search_queries.iter().map(|query| query.trim().to_string()).collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    search_queries.sort();
+    search_queries.dedup();
+
     if author_ids.is_empty()
         && source_ids.is_empty()
+        && search_queries.is_empty()
         && curated_sources.is_empty()
         && biorxiv_categories.is_empty()
         && arxiv_categories.is_empty()
@@ -1120,6 +1152,8 @@ async fn resolve_feed_request(
         from,
         native_from,
         topics,
+        search_queries,
+        relevance_filter: feed.relevance_filter,
         include_core,
         core_available,
         available_curated_sources,
@@ -1423,7 +1457,11 @@ fn reader_feed_from_works(request: &FeedRequest, works: &[Work]) -> reader::Feed
     if request.core_available {
         paper_sources.push(reader::PaperSourceOption {
             value: CORE_PAPER_SOURCE.to_string(),
-            label: "Tracked authors and journals".to_string(),
+            label: if request.search_queries.is_empty() {
+                "Tracked authors and journals"
+            } else {
+                "OpenAlex searches, tracked authors and journals"
+            }.to_string(),
             group: "Core feed",
             selected: request.include_core,
         });
@@ -1486,6 +1524,9 @@ fn channel_metadata(request: &FeedRequest) -> (String, String) {
     }
     if journals > 0 {
         subjects.push(format!("{journals} journal(s)"));
+    }
+    if !request.search_queries.is_empty() {
+        subjects.push(format!("{} field search(es)", request.search_queries.len()));
     }
     if curated_sources > 0 {
         subjects.push(format!("{curated_sources} curated source(s)"));
@@ -1561,6 +1602,9 @@ async fn fetch_works(request: &FeedRequest, policy: discovery::snapshot::Refresh
     }
     let native_works = merge_works(arxiv_works, merge_works(biorxiv_works, curated_works));
     let mut works = merge_works(provider_works, native_works);
+    if let Some(RelevanceFilter::ProteinNanopore) = request.relevance_filter {
+        nanopore::retain_relevant(&mut works);
+    }
     mark_authors_by_name(&mut works, &request.tracked_author_names);
     Ok(works)
 }
@@ -1580,9 +1624,24 @@ async fn fetch_provider_works(request: &FeedRequest) -> Result<Vec<Work>, String
     }
 }
 
-/// Fetch works for the feed as the UNION of an author query and a journal query,
-/// merged, deduplicated by work id, and sorted newest-first.
+/// Union author, journal, and field-search results using the shared version deduplicator.
 async fn fetch_openalex_works(request: &FeedRequest) -> Result<Vec<Work>, String> {
+    if request.author_ids.is_empty()
+        && request.source_ids.is_empty()
+        && request.search_queries.is_empty()
+    {
+        return Ok(Vec::new());
+    }
+    let max_works = max_openalex_works()?;
+    fetch_openalex_works_from(&CLIENT, API_BASE, request, max_works).await
+}
+
+async fn fetch_openalex_works_from(
+    client: &reqwest::Client,
+    api_base: &str,
+    request: &FeedRequest,
+    max_works: usize,
+) -> Result<Vec<Work>, String> {
     let topic_suffix = if request.topics.is_empty() {
         String::new()
     } else {
@@ -1605,8 +1664,8 @@ async fn fetch_openalex_works(request: &FeedRequest) -> Result<Vec<Work>, String
 
     // Run the (up to two) queries concurrently.
     let (author_works, journal_works) = tokio::join!(
-        fetch_works_for_filter(author_filter),
-        fetch_works_for_filter(journal_filter),
+        fetch_works_for_filter(client, api_base, author_filter, max_works),
+        fetch_works_for_filter(client, api_base, journal_filter, max_works),
     );
     let mut author_works =
         author_works.map_err(|error| format!("OpenAlex author query: {error}"))?;
@@ -1615,16 +1674,36 @@ async fn fetch_openalex_works(request: &FeedRequest) -> Result<Vec<Work>, String
     mark_feed_authors(&mut author_works, &request.author_ids);
     mark_feed_authors(&mut journal_works, &request.author_ids);
 
-    Ok(merge_works(author_works, journal_works))
+    let mut works = merge_works(author_works, journal_works);
+    for (index, search) in request.search_queries.iter().enumerate() {
+        let candidates = fetch_works_for_query_from(
+            client,
+            api_base,
+            format!("from_publication_date:{}{topic_suffix}", request.from),
+            Some(search),
+            max_works.min(2_000),
+        ).await.map_err(|error| format!("OpenAlex field search {}: {error}", index + 1))?;
+        works = merge_works(works, candidates);
+    }
+    Ok(works)
 }
 
 /// Run a single `/works` query for the given filter (or return empty if `None`).
-async fn fetch_works_for_filter(filter: Option<String>) -> Result<Vec<Work>, String> {
+async fn fetch_works_for_filter(
+    client: &reqwest::Client,
+    api_base: &str,
+    filter: Option<String>,
+    max_works: usize,
+) -> Result<Vec<Work>, String> {
     let filter = match filter {
         Some(f) => f,
         None => return Ok(Vec::new()),
     };
 
+    fetch_works_for_filter_from(client, api_base, filter, max_works).await
+}
+
+fn max_openalex_works() -> Result<usize, String> {
     let max_works = env::var("GSRF_MAX_OPENALEX_WORKS")
         .ok()
         .map(|value| {
@@ -1637,7 +1716,7 @@ async fn fetch_works_for_filter(filter: Option<String>) -> Result<Vec<Work>, Str
     if max_works == 0 {
         return Err("GSRF_MAX_OPENALEX_WORKS must be greater than zero.".to_string());
     }
-    fetch_works_for_filter_from(&CLIENT, API_BASE, filter, max_works).await
+    Ok(max_works)
 }
 
 async fn fetch_works_for_filter_from(
@@ -1646,10 +1725,25 @@ async fn fetch_works_for_filter_from(
     filter: String,
     max_works: usize,
 ) -> Result<Vec<Work>, String> {
+    fetch_works_for_query_from(client, api_base, filter, None, max_works).await
+}
+
+async fn fetch_works_for_query_from(
+    client: &reqwest::Client,
+    api_base: &str,
+    filter: String,
+    search: Option<&str>,
+    max_works: usize,
+) -> Result<Vec<Work>, String> {
     let mut works = Vec::new();
     let mut cursor = "*".to_string();
     let mut seen_cursors = HashSet::new();
     loop {
+        if search.is_some()
+            && seen_cursors.len() >= max_works.div_ceil(OPENALEX_PAGE_SIZE) + 1
+        {
+            return Err("OpenAlex field search exceeded its pagination request budget.".to_string());
+        }
         if !seen_cursors.insert(cursor.clone()) {
             return Err("OpenAlex returned a repeated pagination cursor.".to_string());
         }
@@ -1659,6 +1753,9 @@ async fn fetch_works_for_filter_from(
             ("per_page".to_string(), OPENALEX_PAGE_SIZE.to_string()),
             ("cursor".to_string(), cursor),
         ];
+        if let Some(search) = search {
+            pairs.push(("search.title_and_abstract".to_string(), search.to_string()));
+        }
         if let Some(m) = mailto() {
             pairs.push(("mailto".to_string(), m));
         }
@@ -2897,6 +2994,8 @@ optional = true
             from: "2026-01-01".to_string(),
             native_from: "2026-01-01".to_string(),
             topics: Vec::new(),
+            search_queries: Vec::new(),
+            relevance_filter: None,
             include_core: true,
             core_available: true,
             available_curated_sources: Vec::new(),
@@ -2923,6 +3022,8 @@ optional = true
             from: "2026-01-01".to_string(),
             native_from: "2026-01-01".to_string(),
             topics: Vec::new(),
+            search_queries: Vec::new(),
+            relevance_filter: None,
             include_core: true,
             core_available: true,
             available_curated_sources: Vec::new(),
@@ -3049,6 +3150,158 @@ optional = true
             select_client_ip(peer_ip, Some(forwarded_ip), true),
             forwarded_ip
         );
+    }
+
+    #[tokio::test]
+    async fn nanopore_feed_configuration_resolves_without_changing_default_feed() {
+        let config: Config = toml::from_str(include_str!("../feeds.toml")).unwrap();
+        let request = resolve_feed_request(
+            &[("feed".into(), "protein-nanopores".into())],
+            &config,
+            Provider::OpenAlex,
+        ).await.unwrap().unwrap();
+        assert_eq!(config.default_feed.as_deref(), Some("bioml"));
+        assert_eq!(request.author_ids, ["A5005023517"]);
+        assert_eq!(request.from, default_from_date(Some(365)));
+        assert_eq!(request.relevance_filter, Some(RelevanceFilter::ProteinNanopore));
+        assert_eq!(request.search_queries.len(), 1);
+        let reader = reader_feed_from_works(&request, &[]);
+        assert!(reader.paper_sources.iter().any(|source| {
+            source.value == "core" && source.selected && source.label.contains("searches")
+        }));
+
+        let original = request.cache_key();
+        let mut changed = request.clone();
+        changed.search_queries.push("nanopore peptide".into());
+        assert_ne!(original, changed.cache_key());
+        changed = request;
+        changed.relevance_filter = None;
+        assert_ne!(original, changed.cache_key());
+
+        let default = resolve_feed_request(&[], &config, Provider::OpenAlex)
+            .await.unwrap().unwrap();
+        assert!(default.search_queries.is_empty());
+        assert_eq!(default.relevance_filter, None);
+    }
+
+    #[tokio::test]
+    async fn search_only_feeds_resolve_and_obey_source_selection() {
+        let config: Config = toml::from_str(r#"
+            default_feed = "field"
+            [feeds.field]
+            search_queries = [" nanopore peptide ", "nanopore peptide"]
+        "#).unwrap();
+        let request = resolve_feed_request(&[], &config, Provider::OpenAlex)
+            .await.unwrap().unwrap();
+        assert!(request.author_ids.is_empty());
+        assert!(request.core_available);
+        assert_eq!(request.search_queries, ["nanopore peptide"]);
+
+        let deselected = resolve_feed_request(
+            &[("paper_sources".into(), "custom".into()),
+              ("paper_source".into(), "biorxiv:biochemistry".into())],
+            &config, Provider::OpenAlex,
+        ).await.unwrap().unwrap();
+        assert!(deselected.search_queries.is_empty());
+        assert!(!deselected.include_core);
+        assert!(resolve_feed_request(&[], &config, Provider::GoogleScholar).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn invalid_field_search_configuration_is_rejected() {
+        for queries in [
+            vec!["".to_string()],
+            vec![" ".to_string()],
+            vec!["a\nb".to_string()],
+            vec!["x".repeat(513)],
+            vec!["valid".to_string(); 5],
+        ] {
+            let mut config = Config::default();
+            config.default_feed = Some("field".into());
+            config.feeds.insert("field".into(), FeedConfig {
+                search_queries: queries,
+                ..FeedConfig::default()
+            });
+            assert!(resolve_feed_request(&[], &config, Provider::OpenAlex).await.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn field_searches_page_deduplicate_and_preserve_author_associations() {
+        let config: Config = toml::from_str(r#"
+            default_feed = "field"
+            [feeds.field]
+            from = "2025-10-24"
+            search_queries = ["nanopore AND (protein OR peptide)"]
+            [[feeds.field.people]]
+            name = "Seed Author"
+            openalex_id = "A1"
+        "#).unwrap();
+        let request = resolve_feed_request(&[], &config, Provider::OpenAlex)
+            .await.unwrap().unwrap();
+        let (api_base, server) = spawn_json_server(vec![
+            r#"{"results":[{"id":"W1","doi":"https://doi.org/10.1000/seed","title":"Nanopore reading of proteins","authorships":[{"author":{"id":"A1","display_name":"Seed Author"}}]}],"meta":{"next_cursor":null}}"#,
+            r#"{"results":[{"id":"W1","doi":"https://doi.org/10.1000/seed","title":"Nanopore reading of proteins"}],"meta":{"next_cursor":"second"}}"#,
+            r#"{"results":[{"id":"W2","doi":"https://doi.org/10.1000/other","title":"Nanopore sensing of peptides","authorships":[{"author":{"id":"A2","display_name":"Other Group"}}]}],"meta":{"next_cursor":null}}"#,
+        ]);
+        let works = fetch_openalex_works_from(&CLIENT, &api_base, &request, 10).await.unwrap();
+        let requests = server.join().unwrap();
+        assert_eq!(works.len(), 2);
+        let seed = works.iter().find(|work| work.id.as_deref() == Some("W1")).unwrap();
+        assert_eq!(seed.matched_author_names, ["Seed Author"]);
+        let other = works.iter().find(|work| work.id.as_deref() == Some("W2")).unwrap();
+        assert!(other.matched_author_names.is_empty());
+        assert!(!work_to_publication(other, &request.people).authors[0].matched_feed);
+        for (index, raw) in requests.iter().enumerate() {
+            let target = raw.split_whitespace().nth(1).unwrap();
+            let url = url::Url::parse(&format!("{api_base}{target}")).unwrap();
+            let params = url.query_pairs().collect::<HashMap<_, _>>();
+            assert!(params["filter"].contains("from_publication_date:2025-10-24"));
+            if index == 0 {
+                assert!(params["filter"].contains("author.id:A1"));
+                assert!(!params.contains_key("search.title_and_abstract"));
+            } else {
+                assert!(!params["filter"].contains("author.id"));
+                assert_eq!(params["search.title_and_abstract"], request.search_queries[0]);
+                assert_eq!(params["cursor"], if index == 1 { "*" } else { "second" });
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn field_search_limit_and_provider_failures_are_not_partial_successes() {
+        let config: Config = toml::from_str(r#"
+            default_feed = "field"
+            [feeds.field]
+            search_queries = ["nanopore protein"]
+        "#).unwrap();
+        let request = resolve_feed_request(&[], &config, Provider::OpenAlex)
+            .await.unwrap().unwrap();
+        for (response, expected) in [
+            (http_response("200 OK", "application/json",
+                r#"{"results":[{"id":"W1"},{"id":"W2"}],"meta":{"next_cursor":null}}"#), "configured 1-work limit"),
+            (http_response("429 Too Many Requests", "application/json", "{}"), "rate or usage budget"),
+        ] {
+            let (api_base, server) = spawn_http_server(vec![response]);
+            let error = fetch_openalex_works_from(&CLIENT, &api_base, &request, 1).await.unwrap_err();
+            assert!(error.contains("OpenAlex field search 1"), "{error}");
+            assert!(error.contains(expected), "{error}");
+            server.join().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn field_search_request_budget_bounds_sparse_cursor_pages() {
+        let (api_base, server) = spawn_json_server(vec![
+            r#"{"results":[],"meta":{"next_cursor":"second"}}"#,
+            r#"{"results":[],"meta":{"next_cursor":"third"}}"#,
+        ]);
+        let error = fetch_works_for_query_from(
+            &CLIENT, &api_base, "from_publication_date:2025-10-24".into(),
+            Some("nanopore protein"), 1,
+        ).await.unwrap_err();
+        assert!(error.contains("pagination request budget"), "{error}");
+        assert_eq!(server.join().unwrap().len(), 2);
     }
 
     #[tokio::test]

@@ -162,6 +162,38 @@ with no network, a read-only root filesystem, and no Docker socket.
 Named feeds live in [`feeds.toml`](./feeds.toml), keeping the public URL stable when authors,
 journals, or topics change.
 
+### Protein nanopores and protein sequencing
+
+The separate `protein-nanopores` feed tracks a rolling year of nanopore-based
+protein/peptide sequencing, sensing, amino-acid discrimination, and motor-controlled
+translocation, including solid-state pores when used for protein measurements. It combines
+field-wide OpenAlex title/abstract searches with Jeff Nivala's verified author ID; all
+candidates pass the same relevance gate. Existing feeds and subscriptions are unchanged.
+After the updated collector is deployed and publishes a snapshot, the static reader and RSS
+are available at:
+
+- <https://reading.michaelmvh.com/feeds/protein-nanopores/>
+- <https://reading.michaelmvh.com/feeds/protein-nanopores/feed.xml>
+
+`search_queries` unions up to four configured OpenAlex Boolean title/abstract searches
+with author/journal results. Each query is limited to 512 bytes and 2,000 candidate works
+(or the lower `GSRF_MAX_OPENALEX_WORKS` limit). Date and optional topic filters apply to
+each search. Search-only feeds are supported; `topics` alone still does not discover works.
+Paging, authentication, version deduplication, and required-refresh failure handling use the
+existing OpenAlex pipeline. Exceeding a limit fails publication instead of truncating it.
+Searches also have a page-request budget, including a final page to confirm exhaustion.
+
+`relevance_filter = "protein_nanopore"` requires pore, protein/peptide analyte, and
+measurement evidence in the title or a single abstract sentence. A protein forming the
+pore is not by itself a protein analyte. Clear title evidence suffices without an abstract;
+otherwise missing abstracts are explicitly logged as exclusions. DNA/RNA-focused titles
+without protein-measurement evidence are excluded, but protein measurements using DNA
+adapters are allowed. Inclusions log the provider ID and matching evidence; each refresh
+reports candidate/accepted counts. This conservative lexical gate can miss vague titles,
+missing metadata, and unusual terminology; it is not a completeness guarantee.
+
+### OpenAlex access
+
 Set `GSRF_MAILTO` to a real contact address before production use. OpenAlex uses it for its
 polite API pool; it is sent to OpenAlex but is not included in the RSS feed or baked into the
 container image.
