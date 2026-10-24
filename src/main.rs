@@ -1889,13 +1889,23 @@ fn work_to_publication(work: &Work, people: &[config::PersonConfig]) -> reader::
         .iter()
         .enumerate()
         .filter_map(|(index, authorship)| {
-            let display_name = authorship
+            let name_and_key = authorship
                 .author
                 .as_ref()
-                .and_then(|author| author.display_name.clone())
-                .or_else(|| authorship.raw_author_name.clone())?;
-            let filter_id = normalize_author_name(&display_name);
-            let author_names = Some(display_name.as_str())
+                .and_then(|author| author.display_name.as_deref())
+                .into_iter()
+                .chain(authorship.raw_author_name.as_deref())
+                .map(|name| (name, normalize_author_name(name)))
+                .find(|(_, key)| !key.is_empty());
+            let Some((display_name, filter_id)) = name_and_key else {
+                eprintln!(
+                    "Skipping unusable author byline {} for work {:?}: no alphanumeric name",
+                    index + 1,
+                    work.id.as_deref()
+                );
+                return None;
+            };
+            let author_names = Some(display_name)
                 .into_iter()
                 .chain(authorship.raw_author_name.as_deref())
                 .collect::<Vec<_>>();
@@ -1961,7 +1971,7 @@ fn work_to_publication(work: &Work, people: &[config::PersonConfig]) -> reader::
                 };
 
             Some(reader::Author {
-                name: display_name,
+                name: display_name.to_string(),
                 filter_id,
                 matched_feed,
                 optional,
@@ -2319,6 +2329,70 @@ mod tests {
             normalize_author_name("Ada Lovelace"),
             normalize_author_name("Grace Hopper")
         );
+    }
+
+    #[test]
+    fn publication_bylines_use_valid_names_and_keep_author_associations() {
+        for (display, raw, expected) in [
+            (
+                Some("Ada Lovelace"),
+                Some("Lovelace, Ada"),
+                Some("Ada Lovelace"),
+            ),
+            (Some(" \n "), Some("Ada Lovelace"), Some("Ada Lovelace")),
+            (Some(":"), Some("Ada Lovelace"), Some("Ada Lovelace")),
+            (None, Some("Ada Lovelace"), Some("Ada Lovelace")),
+            (Some(":"), Some(":"), None),
+            (Some(" \t "), Some(""), None),
+            (None, None, None),
+            (
+                Some("\u{738b}\u{5c0f}\u{660e}"),
+                None,
+                Some("\u{738b}\u{5c0f}\u{660e}"),
+            ),
+            (Some("A. B."), None, Some("A. B.")),
+        ] {
+            let work: Work = serde_json::from_value(serde_json::json!({
+                "id": "https://openalex.org/W1",
+                "authorships": [
+                    {"author": {"display_name": ":"}, "raw_author_name": ":"},
+                    {"author": {"id": "https://openalex.org/A1", "display_name": display}, "raw_author_name": raw},
+                    {"author": {"id": "https://openalex.org/A2", "display_name": "Grace Hopper"}}
+                ]
+            }))
+            .unwrap();
+            let people = [
+                config::PersonConfig {
+                    name: expected.unwrap_or("Ada Lovelace").to_string(),
+                    openalex_id: Some("A1".to_string()),
+                    google_scholar_name: None,
+                    optional: true,
+                },
+                config::PersonConfig {
+                    name: "Grace Hopper".to_string(),
+                    openalex_id: Some("A2".to_string()),
+                    google_scholar_name: None,
+                    optional: false,
+                },
+            ];
+            let publication = work_to_publication(&work, &people);
+            assert_eq!(publication.authors.len(), 1 + usize::from(expected.is_some()));
+            if let Some(expected) = expected {
+                let author = &publication.authors[0];
+                assert_eq!(author.name, expected);
+                assert_eq!(author.filter_id, normalize_author_name(expected));
+                assert!(author.matched_feed);
+                assert!(author.optional);
+            }
+            let author = publication.authors.last().unwrap();
+            assert_eq!(author.name, "Grace Hopper");
+            assert!(author.matched_feed);
+            assert!(!author.optional);
+            assert!(publication
+                .authors
+                .iter()
+                .all(|author| !author.filter_id.is_empty()));
+        }
     }
 
     #[test]
