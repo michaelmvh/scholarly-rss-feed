@@ -56,10 +56,21 @@ pub struct FeedConfig {
     pub journals: Vec<String>,
     #[serde(default)]
     pub topics: Vec<String>,
+    /// Field-wide OpenAlex title/abstract searches, unioned with authors and journals.
+    #[serde(default)]
+    pub search_queries: Vec<String>,
+    /// Relevance gate applied to every discovered candidate in this feed.
+    pub relevance_filter: Option<RelevanceFilter>,
     /// Feed-specific rolling recency window in days.
     pub from_days: Option<u32>,
     /// Explicit earliest publication date (YYYY-MM-DD); overrides `from_days`.
     pub from: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Hash, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum RelevanceFilter {
+    ProteinNanopore,
 }
 
 #[derive(Debug, Clone, Deserialize, Hash, Eq, PartialEq)]
