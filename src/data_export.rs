@@ -151,6 +151,36 @@ fn read(path: &Path) -> Result<Vec<u8>, String> {
     fs::read(path).map_err(|error| format!("Cannot read {}: {error}", path.display()))
 }
 
+fn article_url(link: &str) -> Result<url::Url, String> {
+    let url = url::Url::parse(link).map_err(|error| format!("Invalid article URL: {error}"))?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err("Article links must be HTTP(S) without credentials.".to_string());
+    }
+    Ok(url)
+}
+
+fn normalize_article_urls(article: &mut Article) -> Result<(), String> {
+    for link in article
+        .link
+        .iter_mut()
+        .chain(&mut article.pdf_url)
+        .chain(article.collection_date.iter_mut().map(|date| &mut date.commit_url))
+        .chain(
+            article
+                .discovery_sources
+                .iter_mut()
+                .filter_map(|source| source.url.as_mut()),
+        )
+    {
+        *link = article_url(link)?.into();
+    }
+    Ok(())
+}
+
 fn validate_article(article: &Article) -> Result<(), String> {
     let invalid = |field: &str| format!("Article {:?}: invalid {field}.", article.id);
     if !valid_id(&article.id) {
@@ -197,14 +227,7 @@ fn validate_article(article: &Article) -> Result<(), String> {
                 .filter_map(|source| source.url.as_ref()),
         )
     {
-        let url = url::Url::parse(link).map_err(|error| format!("Invalid article URL: {error}"))?;
-        if !matches!(url.scheme(), "http" | "https")
-            || url.host_str().is_none()
-            || !url.username().is_empty()
-            || url.password().is_some()
-        {
-            return Err("Article links must be HTTP(S) without credentials.".to_string());
-        }
+        article_url(link)?;
     }
     Ok(())
 }
@@ -340,7 +363,8 @@ fn identify(
             article = preferred;
         }
     }
-    validate_article(&article)
+    normalize_article_urls(&mut article)
+        .and_then(|()| validate_article(&article))
         .map_err(|error| format!("{error} Source record: {:?}.", publication.id))?;
     for key in &article.identity_keys {
         index.insert(key.clone(), id.clone());
@@ -776,7 +800,9 @@ mod tests {
             group: "Core feed",
             selected: true,
         });
-        let required = sample("required", false);
+        let mut required = sample("required", false);
+        required.feed.publications[0].pdf_url =
+            Some("https://example.org/Supplement 1/paper.pdf".to_string());
         input.feed.publications.extend(required.feed.publications);
         input.keys.extend(required.keys);
         let punctuation = punctuation_byline_input();
@@ -825,6 +851,47 @@ mod tests {
             );
         }
         fs::remove_dir_all(first).unwrap();
+        fs::remove_dir_all(next).unwrap();
+    }
+
+    #[test]
+    fn exported_urls_encode_spaces_and_unicode_without_changing_identity() {
+        let output = directory();
+        let next = directory();
+        let mut input = sample("one", false);
+        let publication = &mut input.feed.publications[0];
+        publication.link = Some("https://example.org/article title".to_string());
+        publication.pdf_url = Some(
+            "https://ashpublications.org/blood/article-pdf/146/Supplement 1/1696/2456088/blood-4443-main.pdf".to_string(),
+        );
+        publication.collection_date = Some(CollectionDate {
+            date: "2026-10-01".to_string(),
+            commit_url: "https://example.org/collection changes".to_string(),
+        });
+        publication.discovery_sources[0].url = Some("https://example.org/caf\u{e9}".to_string());
+        let keys = input.keys[0].clone();
+        export(
+            &ExportArgs::new(output.clone(), None),
+            "feed",
+            BTreeMap::from([("feed".to_string(), input)]),
+        ).unwrap();
+        let archive = load_archive(Some(&output)).unwrap();
+        let id = digest(b"https://example.org/one");
+        let article = &archive[&id];
+        assert_eq!(article.identity_keys, keys);
+        assert_eq!(article.link.as_deref(), Some("https://example.org/article%20title"));
+        assert_eq!(article.pdf_url.as_deref(), Some(
+            "https://ashpublications.org/blood/article-pdf/146/Supplement%201/1696/2456088/blood-4443-main.pdf"
+        ));
+        assert_eq!(article.collection_date.as_ref().unwrap().commit_url, "https://example.org/collection%20changes");
+        assert_eq!(article.discovery_sources[0].url.as_deref(), Some("https://example.org/caf%C3%A9"));
+        export(
+            &ExportArgs::new(next.clone(), Some(output.clone())),
+            "feed",
+            BTreeMap::from([("feed".to_string(), sample("one", false))]),
+        ).unwrap();
+        assert!(load_archive(Some(&next)).unwrap().contains_key(&id));
+        fs::remove_dir_all(output).unwrap();
         fs::remove_dir_all(next).unwrap();
     }
 
