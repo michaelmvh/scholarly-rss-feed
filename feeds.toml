@@ -51,10 +51,6 @@ name = "Matthew D. Golub"
 openalex_id = "A5008892922"
 
 [[feeds.bioml.people]]
-name = "Nathaniel Corley"
-openalex_id = "A5114342824"
-
-[[feeds.bioml.people]]
 name = "Michael M. Bronstein"
 openalex_id = "A5013638126"
 
