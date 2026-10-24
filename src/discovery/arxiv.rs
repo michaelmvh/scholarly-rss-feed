@@ -9,7 +9,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use std::io::Cursor;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tokio::time::Instant;
 
 const RSS_BASE: &str = "https://rss.arxiv.org/rss";
@@ -19,6 +19,9 @@ const OVERLAP_DAYS: u32 = 2;
 const ATOM_PAGE_SIZE: usize = 2_000;
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const API_DELAY: Duration = Duration::from_secs(3);
+const MAX_RATE_LIMIT_RETRIES: u32 = 3;
+const RETRY_BACKOFF: Duration = Duration::from_secs(30);
+const MAX_RETRY_WAIT: Duration = Duration::from_secs(5 * 60);
 pub const CATEGORIES: &[(&str, &str)] = &[
     ("physics.bio-ph", "Biological Physics"),
     ("q-bio.BM", "Biomolecules"),
@@ -168,7 +171,6 @@ async fn fetch_atom_pages(
     let mut works = Vec::new();
 
     loop {
-        wait_for_api_rate_limit().await;
         let start_value = start.to_string();
         let page_size = ATOM_PAGE_SIZE.to_string();
         let bytes = fetch_bytes(
@@ -199,15 +201,6 @@ async fn fetch_atom_pages(
     Ok(works)
 }
 
-async fn wait_for_api_rate_limit() {
-    let mut last_request = API_RATE_LIMITER.lock().await;
-    let now = Instant::now();
-    if let Some(delay) = remaining_api_delay(*last_request, now) {
-        tokio::time::sleep(delay).await;
-    }
-    *last_request = Some(Instant::now());
-}
-
 fn remaining_api_delay(last_request: Option<Instant>, now: Instant) -> Option<Duration> {
     last_request
         .and_then(|last_request| API_DELAY.checked_sub(now.duration_since(last_request)))
@@ -215,12 +208,60 @@ fn remaining_api_delay(last_request: Option<Instant>, now: Instant) -> Option<Du
 }
 
 async fn fetch_bytes(request: reqwest::RequestBuilder, source: &str) -> Result<Vec<u8>, String> {
-    let response = request
-        .send()
-        .await
-        .map_err(|error| format!("{source} request failed: {error}"))?
-        .error_for_status()
-        .map_err(|error| format!("{source} request failed: {error}"))?;
+    fetch_bytes_with_limiter(request, source, &API_RATE_LIMITER).await
+}
+
+async fn fetch_bytes_with_limiter(
+    request: reqwest::RequestBuilder,
+    source: &str,
+    limiter: &tokio::sync::Mutex<Option<Instant>>,
+) -> Result<Vec<u8>, String> {
+    // RSS and Atom share one connection slot, including response bodies and cooldowns.
+    let mut last_request = limiter.lock().await;
+    let mut retries = 0;
+    let mut waited = Duration::ZERO;
+    let response = loop {
+        if let Some(delay) = remaining_api_delay(*last_request, Instant::now()) {
+            tokio::time::sleep(delay).await;
+        }
+        let attempt = request
+            .try_clone()
+            .ok_or_else(|| format!("{source} request cannot be retried safely"))?;
+        *last_request = Some(Instant::now());
+        let response = attempt
+            .send()
+            .await
+            .map_err(|error| format!("{source} request failed: {error}"))?;
+        if response.status() != reqwest::StatusCode::TOO_MANY_REQUESTS {
+            break response
+                .error_for_status()
+                .map_err(|error| format!("{source} request failed: {error}"))?;
+        }
+        if retries == MAX_RATE_LIMIT_RETRIES {
+            return Err(format!(
+                "{source} rate limited (HTTP 429) after {} attempts; retry later",
+                retries + 1
+            ));
+        }
+        let retry_after = response.headers().get(reqwest::header::RETRY_AFTER);
+        let delay = retry_delay(retry_after, retries, waited, SystemTime::now())
+            .map_err(|error| format!("{source} rate limited (HTTP 429): {error}"))?;
+        let reason = if retry_after.is_some() {
+            "Retry-After"
+        } else {
+            "backoff; no Retry-After"
+        };
+        eprintln!(
+            "{source} rate limited (HTTP 429); waiting {:.1}s ({reason}) before retry {}/{}",
+            delay.as_secs_f64(),
+            retries + 1,
+            MAX_RATE_LIMIT_RETRIES
+        );
+        drop(response);
+        tokio::time::sleep(delay).await;
+        waited += delay;
+        retries += 1;
+    };
     if response
         .content_length()
         .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
@@ -239,6 +280,46 @@ async fn fetch_bytes(request: reqwest::RequestBuilder, source: &str) -> Result<V
         ));
     }
     Ok(bytes.to_vec())
+}
+
+fn retry_delay(
+    retry_after: Option<&reqwest::header::HeaderValue>,
+    retries: u32,
+    waited: Duration,
+    now: SystemTime,
+) -> Result<Duration, String> {
+    let delay = match retry_after {
+        Some(value) => {
+            let value = value
+                .to_str()
+                .map_err(|_| "Invalid Retry-After header; no retry sent")?
+                .trim();
+            if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+                Duration::from_secs(
+                    value
+                        .parse()
+                        .map_err(|_| "Invalid Retry-After seconds; no retry sent")?,
+                )
+            } else {
+                httpdate::parse_http_date(value)
+                    .map_err(|_| "Invalid Retry-After date; no retry sent")?
+                    .duration_since(now)
+                    .unwrap_or(Duration::ZERO)
+            }
+        }
+        None => RETRY_BACKOFF * 2_u32.pow(retries),
+    }
+    .max(API_DELAY);
+    let remaining = MAX_RETRY_WAIT.saturating_sub(waited);
+    if delay > remaining {
+        return Err(format!(
+            "required cooldown of {:.1}s exceeds the remaining {:.1}s retry budget; \
+             no retry sent, wait before running again",
+            delay.as_secs_f64(),
+            remaining.as_secs_f64()
+        ));
+    }
+    Ok(delay)
 }
 
 fn atom_query(categories: &[String], from: &str, through: &str) -> Result<String, String> {
