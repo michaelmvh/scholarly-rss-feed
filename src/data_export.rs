@@ -819,6 +819,83 @@ mod tests {
         .unwrap();
     }
 
+    #[tokio::test]
+    async fn protein_design_export_filters_membership_without_duplicating_shared_articles() {
+        let config: Config = toml::from_str(include_str!("../feeds.toml")).unwrap();
+        let candidates: Vec<crate::openalex::Work> = serde_json::from_value(serde_json::json!([
+            {
+                "id": "https://openalex.org/W-design",
+                "title": "Boltz-2: Towards Accurate and Efficient Binding Affinity Prediction",
+                "publication_date": "2026-10-01",
+                "authorships": [{"author": {"id": "https://openalex.org/A5010124873", "display_name": "Regina Barzilay"}}]
+            },
+            {
+                "id": "https://openalex.org/W-field",
+                "title": "De novo protein design",
+                "publication_date": "2026-10-01",
+                "authorships": [{"author": {"id": "https://openalex.org/A-other", "display_name": "Other Researcher"}}]
+            },
+            {
+                "id": "https://openalex.org/W-clinical",
+                "title": "Deep learning for mammography screening",
+                "publication_date": "2026-10-01",
+                "authorships": [{"author": {"id": "https://openalex.org/A5010124873", "display_name": "Regina Barzilay"}}]
+            }
+        ]))
+        .unwrap();
+        let mut inputs = BTreeMap::new();
+        for name in ["bioml", "protein-design"] {
+            let request = crate::resolve_feed_request(
+                &[("feed".into(), name.to_string())],
+                &config,
+                Provider::OpenAlex,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let mut works = candidates.clone();
+            if request.relevance_filter == Some(crate::config::RelevanceFilter::ProteinDesign) {
+                crate::protein_design::retain_relevant(&mut works);
+            }
+            crate::works::mark_feed_authors(&mut works, &request.author_ids);
+            for work in &mut works {
+                work.add_discovery_source(DiscoverySource::openalex());
+            }
+            inputs.insert(
+                name.to_string(),
+                Input {
+                    feed: crate::reader_feed_from_works(&request, &works),
+                    keys: works
+                        .iter()
+                        .map(|work| work.id.iter().cloned().collect())
+                        .collect(),
+                    collected_at: now(),
+                },
+            );
+        }
+        let output = directory();
+        export(&ExportArgs::new(output.clone(), None), "bioml", inputs).unwrap();
+        let snapshot: Snapshot =
+            serde_json::from_slice(&fs::read(output.join("snapshot.json")).unwrap()).unwrap();
+        let main = snapshot.feeds.iter().find(|feed| feed.id == "bioml").unwrap();
+        let design = snapshot
+            .feeds
+            .iter()
+            .find(|feed| feed.id == "protein-design")
+            .unwrap();
+        assert_eq!(main.article_ids.len(), 3);
+        assert_eq!(design.article_ids.len(), 2);
+        assert!(design
+            .article_ids
+            .iter()
+            .all(|id| main.article_ids.contains(id)));
+        assert_eq!(
+            snapshot.article_files.iter().map(|file| file.count).sum::<usize>(),
+            3
+        );
+        fs::remove_dir_all(output).unwrap();
+    }
+
     #[test]
     fn exports_json_only_and_retains_articles_with_stable_shards() {
         let first = directory();

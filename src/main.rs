@@ -7,6 +7,7 @@ mod google_scholar;
 mod openalex;
 mod openalex_enrichment;
 mod nanopore;
+mod protein_design;
 mod provenance;
 mod reader;
 mod snapshot_store;
@@ -1602,8 +1603,10 @@ async fn fetch_works(request: &FeedRequest, policy: discovery::snapshot::Refresh
     }
     let native_works = merge_works(arxiv_works, merge_works(biorxiv_works, curated_works));
     let mut works = merge_works(provider_works, native_works);
-    if let Some(RelevanceFilter::ProteinNanopore) = request.relevance_filter {
-        nanopore::retain_relevant(&mut works);
+    match request.relevance_filter {
+        Some(RelevanceFilter::ProteinNanopore) => nanopore::retain_relevant(&mut works),
+        Some(RelevanceFilter::ProteinDesign) => protein_design::retain_relevant(&mut works),
+        None => {}
     }
     mark_authors_by_name(&mut works, &request.tracked_author_names);
     Ok(works)
@@ -1647,7 +1650,12 @@ async fn fetch_openalex_works_from(
     } else {
         format!(",topics.id:{}", request.topics.join("|"))
     };
-    let from_suffix = format!(",from_publication_date:{}", request.from);
+    let type_suffix = if request.relevance_filter == Some(RelevanceFilter::ProteinDesign) {
+        ",type:article|preprint|review"
+    } else {
+        ""
+    };
+    let from_suffix = format!(",from_publication_date:{}{type_suffix}", request.from);
 
     let author_filter = (!request.author_ids.is_empty()).then(|| {
         format!(
@@ -1679,7 +1687,7 @@ async fn fetch_openalex_works_from(
         let candidates = fetch_works_for_query_from(
             client,
             api_base,
-            format!("from_publication_date:{}{topic_suffix}", request.from),
+            format!("from_publication_date:{}{topic_suffix}{type_suffix}", request.from),
             Some(search),
             max_works.min(2_000),
         ).await.map_err(|error| format!("OpenAlex field search {}: {error}", index + 1))?;
@@ -3153,6 +3161,89 @@ optional = true
     }
 
     #[tokio::test]
+    async fn protein_design_feed_resolves_with_focused_authors_and_field_searches() {
+        let config: Config = toml::from_str(include_str!("../feeds.toml")).unwrap();
+        let request = resolve_feed_request(
+            &[("feed".into(), "protein-design".into())],
+            &config,
+            Provider::OpenAlex,
+        ).await.unwrap().unwrap();
+        assert_eq!(request.from, default_from_date(Some(365)));
+        assert_eq!(request.relevance_filter, Some(RelevanceFilter::ProteinDesign));
+        assert!(request.curated_sources.is_empty());
+        assert!(request.biorxiv_categories.is_empty());
+        assert!(request.arxiv_categories.is_empty());
+        assert!(request.source_ids.is_empty());
+        assert!(request.people.iter().all(|person| person.openalex_id.is_some() && !person.optional));
+        for (name, id) in [
+            ("David Baker", "A5053192926"),
+            ("Neil King", "A5016851342"),
+            ("Gaurav Bhardwaj", "A5048995657"),
+            ("Green Ahn", "A5068384996"),
+            ("Regina Barzilay", "A5010124873"),
+            ("Tommi Jaakkola", "A5048915657"),
+            ("Jeremy Wohlwend", "A5082461467"),
+            ("Gabriele Corso", "A5057871229"),
+            ("Saro Passaro", "A5068703084"),
+            ("Hannes Stark", "A5064282770"),
+            ("Noah Getz", "A5118396049"),
+            ("Mateo Reveiz", "A5060867169"),
+        ] {
+            assert!(request.people.iter().any(|person| {
+                person.name == name && person.openalex_id.as_deref() == Some(id)
+            }), "{name}");
+        }
+        assert_eq!(request.search_queries.len(), 4);
+        let reader = reader_feed_from_works(&request, &[]);
+        assert!(reader.paper_sources.iter().any(|source| {
+            source.value == "core" && source.selected && source.label.contains("searches")
+        }));
+        let original = request.cache_key();
+        let mut unfiltered = request;
+        unfiltered.relevance_filter = None;
+        assert_ne!(original, unfiltered.cache_key());
+
+        let default = resolve_feed_request(&[], &config, Provider::OpenAlex)
+            .await.unwrap().unwrap();
+        assert_eq!(config.default_feed.as_deref(), Some("bioml"));
+        assert_eq!(default.relevance_filter, None);
+        assert_eq!(default.curated_sources, ["peldom-protein-design"]);
+        assert!(default.author_ids.contains(&"A5053192926".to_string()));
+        assert!(!default.author_ids.contains(&"A5135542215".to_string()));
+        let archive = &config.feeds["protein-design-archive"];
+        assert_eq!(archive.from.as_deref(), Some("1900-01-01"));
+        assert_eq!(archive.curated_sources, ["peldom-protein-design"]);
+    }
+
+    #[tokio::test]
+    async fn protein_design_queries_restrict_publication_types_and_filter_merged_candidates() {
+        let config: Config = toml::from_str(include_str!("../feeds.toml")).unwrap();
+        let request = resolve_feed_request(
+            &[("feed".into(), "protein-design".into())], &config, Provider::OpenAlex,
+        ).await.unwrap().unwrap();
+        let (api_base, server) = spawn_json_server(vec![
+            r#"{"results":[{"id":"W1","title":"Enzyme design"},{"id":"W2","title":"Deep learning for mammography screening"}],"meta":{"next_cursor":null}}"#,
+            r#"{"results":[{"id":"W1","title":"Enzyme design"},{"id":"W3","title":"RNA inverse folding with diffusion"}],"meta":{"next_cursor":null}}"#,
+            r#"{"results":[],"meta":{"next_cursor":null}}"#,
+            r#"{"results":[],"meta":{"next_cursor":null}}"#,
+            r#"{"results":[],"meta":{"next_cursor":null}}"#,
+        ]);
+        let mut works = fetch_openalex_works_from(&CLIENT, &api_base, &request, 10)
+            .await.unwrap();
+        assert_eq!(works.len(), 3);
+        protein_design::retain_relevant(&mut works);
+        assert_eq!(works.len(), 1);
+        assert_eq!(works[0].id.as_deref(), Some("W1"));
+        for raw in server.join().unwrap() {
+            let target = raw.split_whitespace().nth(1).unwrap();
+            let url = url::Url::parse(&format!("{api_base}{target}")).unwrap();
+            let params = url.query_pairs().collect::<HashMap<_, _>>();
+            assert!(params["filter"].contains("type:article|preprint|review"));
+            assert!(params["filter"].contains(&format!("from_publication_date:{}", request.from)));
+        }
+    }
+
+    #[tokio::test]
     async fn nanopore_feed_configuration_resolves_without_changing_default_feed() {
         let config: Config = toml::from_str(include_str!("../feeds.toml")).unwrap();
         let request = resolve_feed_request(
@@ -3285,6 +3376,7 @@ optional = true
             let url = url::Url::parse(&format!("{api_base}{target}")).unwrap();
             let params = url.query_pairs().collect::<HashMap<_, _>>();
             assert!(params["filter"].contains("from_publication_date:2025-10-24"));
+            assert!(!params["filter"].contains("type:"));
             if index == 0 {
                 assert!(params["filter"].contains("author.id:A1"));
                 assert!(!params.contains_key("search.title_and_abstract"));

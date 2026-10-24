@@ -71,6 +71,7 @@ pub struct FeedConfig {
 #[serde(rename_all = "snake_case")]
 pub enum RelevanceFilter {
     ProteinNanopore,
+    ProteinDesign,
 }
 
 #[derive(Debug, Clone, Deserialize, Hash, Eq, PartialEq)]

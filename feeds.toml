@@ -24,7 +24,7 @@ curated_sources = ["peldom-protein-design"]
 
 [[feeds.bioml.people]]
 name = "David Baker"
-openalex_id = "A5135542215"
+openalex_id = "A5053192926"
 
 [[feeds.bioml.people]]
 name = "Jeff Nivala"
@@ -127,6 +127,101 @@ arxiv_categories = ["q-bio.BM", "q-bio.QM"]
 title = "Deep Learning for Protein Design"
 from = "1900-01-01"
 curated_sources = ["peldom-protein-design"]
+
+[feeds.protein-design]
+title = "Protein Design & Biomolecular Models"
+from_days = 365
+search_queries = [
+    '"protein design" OR "de novo protein" OR "inverse folding"',
+    '"protein sequence design" OR "binder design" OR "enzyme design" OR "antibody design" OR "peptide design"',
+    '(protein OR biomolecular) AND ("language model" OR "foundation model") AND (design OR generative OR engineering)',
+    'Boltz OR BoltzGen OR RFdiffusion OR ProteinMPNN OR LigandMPNN OR "biomolecular interaction prediction" OR "biomolecular interaction modeling"',
+]
+relevance_filter = "protein_design"
+
+# Existing tracked researchers; Baker's current ID is verified on ProteinMPNN:
+# https://doi.org/10.1126/science.add2187
+[[feeds.protein-design.people]]
+name = "David Baker"
+openalex_id = "A5053192926"
+
+[[feeds.protein-design.people]]
+name = "Frank DiMaio"
+openalex_id = "A5105925656"
+
+[[feeds.protein-design.people]]
+name = "Sergey Ovchinnikov"
+openalex_id = "A5084204507"
+
+[[feeds.protein-design.people]]
+name = "Brian Hie"
+openalex_id = "A5021962955"
+
+[[feeds.protein-design.people]]
+name = "Kevin K. Yang"
+openalex_id = "A5060834723"
+
+[[feeds.protein-design.people]]
+name = "Pranam Chatterjee"
+openalex_id = "A5016342562"
+
+[[feeds.protein-design.people]]
+name = "Nicholas F. Polizzi"
+openalex_id = "A5058410619"
+
+[[feeds.protein-design.people]]
+name = "Charlotte Mary Deane"
+openalex_id = "A5015572211"
+
+# Additional IPD researchers; IDs verified on these papers.
+# https://doi.org/10.1126/science.add2187
+[[feeds.protein-design.people]]
+name = "Neil King"
+openalex_id = "A5016851342"
+
+# https://doi.org/10.1038/nature19791
+[[feeds.protein-design.people]]
+name = "Gaurav Bhardwaj"
+openalex_id = "A5048995657"
+
+# https://doi.org/10.1038/s41586-020-2545-9
+[[feeds.protein-design.people]]
+name = "Green Ahn"
+openalex_id = "A5068384996"
+
+# MIT/Boltz authors verified on https://doi.org/10.1101/2025.06.14.659707
+[[feeds.protein-design.people]]
+name = "Regina Barzilay"
+openalex_id = "A5010124873"
+
+[[feeds.protein-design.people]]
+name = "Tommi Jaakkola"
+openalex_id = "A5048915657"
+
+[[feeds.protein-design.people]]
+name = "Jeremy Wohlwend"
+openalex_id = "A5082461467"
+
+[[feeds.protein-design.people]]
+name = "Gabriele Corso"
+openalex_id = "A5057871229"
+
+[[feeds.protein-design.people]]
+name = "Saro Passaro"
+openalex_id = "A5068703084"
+
+# https://doi.org/10.1093/bioinformatics/btag156
+[[feeds.protein-design.people]]
+name = "Hannes Stark"
+openalex_id = "A5064282770"
+
+[[feeds.protein-design.people]]
+name = "Noah Getz"
+openalex_id = "A5118396049"
+
+[[feeds.protein-design.people]]
+name = "Mateo Reveiz"
+openalex_id = "A5060867169"
 
 [feeds.protein-nanopores]
 title = "Protein Nanopores & Protein Sequencing"

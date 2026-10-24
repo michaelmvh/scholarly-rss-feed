@@ -162,6 +162,48 @@ with no network, a read-only root filesystem, and no Docker socket.
 Named feeds live in [`feeds.toml`](./feeds.toml), keeping the public URL stable when authors,
 journals, or topics change.
 
+### Protein design and biomolecular models
+
+The `protein-design` feed combines a rolling year of OpenAlex author results with four
+bounded field-wide title/abstract searches, restricted to articles, preprints, and reviews
+rather than dataset/software records. It covers protein, peptide, antibody, binder,
+enzyme, and protein-nanomaterial design, inverse folding, generative protein models, and
+enabling structure/interaction/affinity models such as Boltz. The existing `bioml` feed
+keeps its selection apart from correcting Baker's retired OpenAlex ID. The Peldom-backed
+`protein-design-archive` is unchanged; this live feed does not depend on Peldom updates
+or refresh availability.
+
+Tracked researchers are David Baker, Frank DiMaio, Sergey Ovchinnikov, Brian Hie,
+Kevin K. Yang, Pranam Chatterjee, Nicholas F. Polizzi, Charlotte Mary Deane, Neil King,
+Gaurav Bhardwaj, Green Ahn, Regina Barzilay, Tommi Jaakkola, Jeremy Wohlwend, Gabriele
+Corso, Saro Passaro, Hannes Stark, Noah Getz, and Mateo Reveiz. OpenAlex IDs are explicit
+in `feeds.toml`; new IDs are checked against relevant paper authorships. Baker's current
+ID is used in both live feeds because his previous ID no longer resolves.
+
+`relevance_filter = "protein_design"` applies to all candidates, including tracked-author
+papers. It requires title or single-abstract-sentence evidence of design/engineering/
+optimization near proteins or related molecules, protein inverse folding, generative protein
+sequence/structure models, or enabling biomolecular prediction methods. An author match
+or a model name mentioned alone is insufficient. Abstract-only evidence must occur in a
+sentence describing the work's contribution, not just background about an existing
+designed therapeutic. RNA/DNA-focused titles without protein evidence, materials binders,
+general clinical AI, generic graph ML, and descriptive structural biology without this
+evidence are excluded. Clear titles can qualify without abstracts. Inclusions, exclusions,
+and refresh totals are logged. This lexical gate can miss unusual terminology and admit
+incidental background statements;
+it is not a completeness guarantee or a semantic classifier.
+
+After the updated collector image is deployed and publishes a snapshot, the existing
+reader collection menu exposes:
+
+- <https://reading.michaelmvh.com/feeds/protein-design/>
+- <https://reading.michaelmvh.com/feeds/protein-design/feed.xml>
+
+Native preprint-category ingestion is not enabled for this feed. Papers indexed by
+OpenAlex can include preprints, and existing version deduplication and canonical article
+identities are reused. Field-search candidate limits and required-refresh failures stop
+publication rather than silently truncating results.
+
 ### Protein nanopores and protein sequencing
 
 The separate `protein-nanopores` feed tracks a rolling year of nanopore-based
