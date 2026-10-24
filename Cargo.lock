@@ -1203,6 +1203,7 @@ dependencies = [
  "atom_syndication",
  "chrono",
  "http-body-util",
+ "httpdate",
  "hyper",
  "hyper-util",
  "lazy_static",
