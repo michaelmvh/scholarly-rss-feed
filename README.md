@@ -167,8 +167,12 @@ journals, or topics change.
 The separate `protein-nanopores` feed tracks a rolling year of nanopore-based
 protein/peptide sequencing, sensing, amino-acid discrimination, and motor-controlled
 translocation, including solid-state pores when used for protein measurements. It combines
-field-wide OpenAlex title/abstract searches with Jeff Nivala's verified author ID; all
-candidates pass the same relevance gate. Existing feeds and subscriptions are unchanged.
+field-wide OpenAlex title/abstract searches with verified author IDs for Jeff Nivala,
+Cees Dekker, Henry Brinkerhoff, Meni Wanunu, Giovanni Maglia, Chunzhe Lu, Shuo Huang,
+and Aleksei Aksimentiev. Native bioRxiv discovery covers `biophysics` and `bioinformatics`,
+including preprints not yet indexed by OpenAlex. All candidates, including author and
+native-preprint matches, pass the same relevance gate. Existing feeds and subscriptions
+are unchanged.
 After the updated collector is deployed and publishes a snapshot, the static reader and RSS
 are available at:
 
@@ -191,6 +195,37 @@ without protein-measurement evidence are excluded, but protein measurements usin
 adapters are allowed. Inclusions log the provider ID and matching evidence; each refresh
 reports candidate/accepted counts. This conservative lexical gate can miss vague titles,
 missing metadata, and unusual terminology; it is not a completeness guarantee.
+
+Discovery includes CsgG/CsgF, CytK/cytotoxin K, FraC/fragaceatoxin C, and both
+hemolysin spellings, alongside MspA and aerolysin. Protein/proteoform and modification
+terms are complemented by an electroosmotic-flow, motor-free, and DNA-peptide transport
+search. Identification, fingerprinting, variant discrimination, PTM detection, and
+quantification are relevant even when a paper does not claim de novo sequencing.
+Generic pore engineering and routine DNA/RNA sequencing remain excluded.
+
+### Nanopore foundations and signal analysis
+
+The separate `nanopore-foundations` feed preserves an all-history curated reading list,
+without broad author searches or the protein-analyte gate. It includes the HMM primer,
+segmentation, Chiron/CTC, DeepNano/RNNs, reviews, protein-reading landmarks, and recent
+examples of each experimental approach. This keeps transferable DNA signal-analysis
+methods available without admitting routine DNA sequencing into `protein-nanopores`.
+
+The 19 DOI-backed seed records live in
+[`src/curated/nanopore-foundations.json`](./src/curated/nanopore-foundations.json).
+Titles, authors, and dates were checked against Europe PMC, Crossref, and bioRxiv metadata;
+author IDs in `feeds.toml` were checked against OpenAlex landmark-paper authorships.
+The collection is bundled into the binary, uses the existing curated-source enrichment
+and deduplication pipeline, and retains bibliographic records if enrichment is unavailable.
+Categories describe approaches and demonstrated capabilities, not equivalent claims of
+sequencing accuracy. Preprints are labeled explicitly, including the Research Square
+CytK paper; PMC availability alone does not imply peer review.
+
+Once a new snapshot is published, the reader and RSS paths are
+`/feeds/nanopore-foundations/` and `/feeds/nanopore-foundations/feed.xml`.
+Edit the seed JSON to maintain the collection; the all-history cutoff keeps older papers
+visible. Wikipedia, blog posts, and software announcements are not represented as papers.
+This does not add a general Research Square crawler or a live methods-discovery feed.
 
 ### OpenAlex access
 

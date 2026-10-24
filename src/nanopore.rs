@@ -10,10 +10,18 @@ fn normalized(text: &str) -> String {
 
 fn has_pore(text: &str) -> bool {
     text.split_whitespace()
-        .any(|word| word.starts_with("nanopore") || matches!(word, "aerolysin" | "mspa" | "clya"))
+        .any(|word| {
+            word.starts_with("nanopore")
+                || matches!(
+                    word,
+                    "aerolysin" | "mspa" | "clya" | "csgg" | "csgf" | "cytk" | "frac"
+                )
+        })
         || text.contains("nano pore")
         || text.contains("hemolysin")
         || text.contains("haemolysin")
+        || text.contains("cytotoxin k")
+        || text.contains("fragaceatoxin c")
 }
 
 fn has_analyte(text: &str) -> bool {
@@ -22,6 +30,9 @@ fn has_analyte(text: &str) -> bool {
         word.starts_with("peptide")
             || word.starts_with("polypeptide")
             || word.starts_with("proteom")
+            || word.starts_with("proteoform")
+            || word.starts_with("phosphopeptide")
+            || word.starts_with("glycopeptide")
             || word.starts_with("residue")
             || matches!(*word, "clpx" | "unfoldase")
             || (matches!(*word, "protein" | "proteins")
@@ -74,6 +85,9 @@ fn has_measurement(text: &str) -> bool {
             "classif",
             "decod",
             "analys",
+            "quantif",
+            "cleav",
+            "shorten",
         ]
         .iter()
         .any(|prefix| word.starts_with(prefix))
@@ -193,6 +207,29 @@ mod tests {
     }
 
     #[test]
+    fn accepts_reading_list_pore_names_and_proteoform_measurements() {
+        for title in [
+            "CsgG reading of protein strands",
+            "CsgF peptide identification",
+            "CytK fingerprinting of proteoforms",
+            "Cytotoxin K transport of polypeptides",
+            "FraC quantification of proteins",
+            "Fragaceatoxin C discrimination of amino acids",
+            "Haemolysin sensing of glycopeptides",
+            "MspA detection of phosphopeptides",
+            "Sequential reading of a stepwise-shortened peptide immobilized on nanopore",
+            "High-Rate Fingerprinting of Protein Isoforms by Quasi-regulated Enzyme-free Transport Through CytK Nanopores",
+        ] {
+            assert!(evidence(&paper(title, None)).is_ok(), "{title}");
+        }
+        assert!(evidence(&paper(
+            "Electroosmotic control in CytK",
+            Some("CytK enables quantification of proteoforms using electroosmotic flow."),
+        ))
+        .is_ok());
+    }
+
+    #[test]
     fn rejects_material_only_and_nucleic_acid_background_matches() {
         for title in [
             "Protein nanopore sequencing of DNA",
@@ -205,6 +242,12 @@ mod tests {
             "Engineering protein nanopores",
             "Unfoldase-mediated protein degradation",
             "Genome assembly using nanopore reads",
+            "CsgG protein nanopore sequencing of DNA",
+            "CsgF protein engineering",
+            "CytK protein pores for RNA detection",
+            "FraC nanopores for DNA sequencing",
+            "Electroosmotic flow through CytK",
+            "Nanopore detection of RNA isoforms",
         ] {
             assert!(evidence(&paper(title, None)).is_err(), "{title}");
         }

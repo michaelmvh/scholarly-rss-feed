@@ -24,7 +24,7 @@ fn normalizes_published_doi_urls() {
 }
 
 #[test]
-fn validates_only_pilot_categories() {
+fn validates_supported_categories() {
     assert!(validate_categories(&[
         "synthetic_biology".to_string(),
         "bioinformatics".to_string()
@@ -35,6 +35,7 @@ fn validates_only_pilot_categories() {
         "systems_biology".to_string(),
         "genomics".to_string(),
         "biochemistry".to_string(),
+        "biophysics".to_string(),
         "molecular_biology".to_string(),
     ])
     .is_ok());
@@ -42,6 +43,22 @@ fn validates_only_pilot_categories() {
         validate_categories(&["neuroscience".to_string()]).unwrap_err(),
         "Unknown bioRxiv category \"neuroscience\"."
     );
+}
+
+#[test]
+fn converts_biophysics_protein_preprints() {
+    let mut source = api_work();
+    source.category = "biophysics".to_string();
+    source.title = "Single-molecule identification of full-length proteins with single-amino-acid resolution using nanopores".to_string();
+    let work = convert_work("biophysics", source).unwrap();
+
+    assert_eq!(
+        work.discovery_sources[0],
+        DiscoverySource::biorxiv_category("biophysics", "Biophysics")
+    );
+    let mut works = vec![work];
+    crate::nanopore::retain_relevant(&mut works);
+    assert_eq!(works.len(), 1);
 }
 
 #[test]

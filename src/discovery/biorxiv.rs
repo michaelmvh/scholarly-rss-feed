@@ -17,6 +17,7 @@ pub const CATEGORIES: &[(&str, &str)] = &[
     ("biochemistry", "Biochemistry"),
     ("bioengineering", "Bioengineering"),
     ("bioinformatics", "Bioinformatics"),
+    ("biophysics", "Biophysics"),
     ("genomics", "Genomics"),
     ("molecular_biology", "Molecular Biology"),
     ("synthetic_biology", "Synthetic Biology"),

@@ -3161,10 +3161,14 @@ optional = true
             Provider::OpenAlex,
         ).await.unwrap().unwrap();
         assert_eq!(config.default_feed.as_deref(), Some("bioml"));
-        assert_eq!(request.author_ids, ["A5005023517"]);
+        assert_eq!(request.author_ids, [
+            "A5005023517", "A5024173154", "A5029634228", "A5053570180",
+            "A5070284401", "A5076175038", "A5089996499", "A5090154593",
+        ]);
         assert_eq!(request.from, default_from_date(Some(365)));
         assert_eq!(request.relevance_filter, Some(RelevanceFilter::ProteinNanopore));
-        assert_eq!(request.search_queries.len(), 1);
+        assert_eq!(request.search_queries.len(), 2);
+        assert_eq!(request.biorxiv_categories, ["bioinformatics", "biophysics"]);
         let reader = reader_feed_from_works(&request, &[]);
         assert!(reader.paper_sources.iter().any(|source| {
             source.value == "core" && source.selected && source.label.contains("searches")
@@ -3182,6 +3186,30 @@ optional = true
             .await.unwrap().unwrap();
         assert!(default.search_queries.is_empty());
         assert_eq!(default.relevance_filter, None);
+    }
+
+    #[tokio::test]
+    async fn nanopore_foundations_resolve_without_the_protein_relevance_gate() {
+        let config: Config = toml::from_str(include_str!("../feeds.toml")).unwrap();
+        let request = resolve_feed_request(
+            &[("feed".into(), "nanopore-foundations".into())],
+            &config,
+            Provider::OpenAlex,
+        ).await.unwrap().unwrap();
+
+        assert_eq!(request.from, "1900-01-01");
+        assert_eq!(request.curated_sources, [curated::NANOPORE_FOUNDATIONS]);
+        assert!(request.author_ids.is_empty());
+        assert!(request.search_queries.is_empty());
+        assert!(request.biorxiv_categories.is_empty());
+        assert_eq!(request.relevance_filter, None);
+
+        let reader = reader_feed_from_works(&request, &[]);
+        assert!(reader.paper_sources.iter().any(|source| {
+            source.value == format!("{CURATED_SOURCE_PREFIX}{}", curated::NANOPORE_FOUNDATIONS)
+                && source.selected
+                && source.label == "Nanopore Foundations & Signal Analysis"
+        }));
     }
 
     #[tokio::test]

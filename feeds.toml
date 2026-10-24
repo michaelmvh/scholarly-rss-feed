@@ -137,9 +137,51 @@ curated_sources = ["peldom-protein-design"]
 [feeds.protein-nanopores]
 title = "Protein Nanopores & Protein Sequencing"
 from_days = 365
-search_queries = ['(nanopore OR "nano-pore" OR aerolysin OR "alpha-hemolysin" OR MspA) AND (protein OR peptide OR polypeptide OR "amino acid" OR unfoldase OR ClpX)']
+search_queries = [
+    '(nanopore OR "nano-pore" OR aerolysin OR hemolysin OR haemolysin OR MspA OR CsgG OR CsgF OR CytK OR "cytotoxin K" OR FraC OR "fragaceatoxin C") AND (protein OR peptide OR polypeptide OR phosphopeptide OR glycopeptide OR proteoform OR proteome OR proteomic OR proteomics OR "amino acid" OR unfoldase OR ClpX OR phosphorylation OR glycosylation OR aminopeptidase OR exopeptidase OR "Edman degradation")',
+    '(nanopore OR "nano-pore" OR aerolysin OR hemolysin OR haemolysin OR MspA OR CsgG OR CsgF OR CytK OR "cytotoxin K" OR FraC OR "fragaceatoxin C") AND (electroosmotic OR "electro-osmotic" OR "enzyme-free" OR "motor-free" OR "DNA-peptide" OR ratcheting)',
+]
+biorxiv_categories = ["biophysics", "bioinformatics"]
 relevance_filter = "protein_nanopore"
 
 [[feeds.protein-nanopores.people]]
 name = "Jeff Nivala"
 openalex_id = "A5005023517"
+
+# IDs verified against authorships on the linked landmark papers.
+# https://doi.org/10.1126/science.abl4381
+[[feeds.protein-nanopores.people]]
+name = "Cees Dekker"
+openalex_id = "A5089996499"
+
+[[feeds.protein-nanopores.people]]
+name = "Henry Brinkerhoff"
+openalex_id = "A5090154593"
+
+[[feeds.protein-nanopores.people]]
+name = "Aleksei Aksimentiev"
+openalex_id = "A5076175038"
+
+# https://doi.org/10.1038/s41587-022-01598-3
+[[feeds.protein-nanopores.people]]
+name = "Meni Wanunu"
+openalex_id = "A5029634228"
+
+# https://doi.org/10.1038/s41587-025-02587-y
+[[feeds.protein-nanopores.people]]
+name = "Giovanni Maglia"
+openalex_id = "A5024173154"
+
+[[feeds.protein-nanopores.people]]
+name = "Chunzhe Lu"
+openalex_id = "A5053570180"
+
+# https://doi.org/10.1038/s41586-026-10881-1
+[[feeds.protein-nanopores.people]]
+name = "Shuo Huang"
+openalex_id = "A5070284401"
+
+[feeds.nanopore-foundations]
+title = "Nanopore Foundations & Signal Analysis"
+from = "1900-01-01"
+curated_sources = ["nanopore-foundations"]
