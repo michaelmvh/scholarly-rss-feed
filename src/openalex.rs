@@ -1,6 +1,7 @@
 use crate::provenance::DiscoverySource;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::time::Duration;
 
 pub const API_BASE: &str = "https://api.openalex.org";
 
@@ -41,6 +42,101 @@ pub fn request_error(error: reqwest::Error) -> String {
             "OpenAlex rate or usage budget limit reached. Check the API key's usage before retrying.".to_string(),
         _ => format!("OpenAlex request failed: {error}"),
     }
+}
+
+struct DecodeFailure {
+    message: String,
+    retryable: bool,
+}
+
+fn decode_works_response(bytes: &[u8]) -> Result<WorksResponse, DecodeFailure> {
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    let response = serde_path_to_error::deserialize(&mut deserializer).map_err(|error| {
+        let category = error.inner().classify();
+        DecodeFailure {
+            message: format!(
+                "JSON {category:?} error at {}: {}",
+                error.path(),
+                error.inner()
+            ),
+            retryable: error.inner().is_eof(),
+        }
+    })?;
+    deserializer.end().map_err(|error| DecodeFailure {
+        message: format!("JSON {:?} error after the response: {error}", error.classify()),
+        retryable: error.is_eof(),
+    })?;
+    Ok(response)
+}
+
+fn error_details(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut details = error.to_string();
+    let mut cause = error.source();
+    while let Some(error) = cause {
+        details.push_str(": ");
+        details.push_str(&error.to_string());
+        cause = error.source();
+    }
+    details
+}
+
+pub async fn works_page(
+    client: &reqwest::Client,
+    url: url::Url,
+    page: usize,
+    received: usize,
+) -> Result<WorksResponse, String> {
+    const MAX_RETRIES: u32 = 2;
+    let context = format!("OpenAlex works page {page} ({received} records received)");
+    for retry in 0..=MAX_RETRIES {
+        let response = request(client, url.clone())?
+            .send()
+            .await
+            .map_err(|error| format!("{context}: {}", request_error(error.without_url())))?
+            .error_for_status()
+            .map_err(|error| format!("{context}: {}", request_error(error.without_url())))?;
+        let metadata = format!(
+            "HTTP {}, content-type {:?}, content-encoding {:?}",
+            response.status(),
+            response.headers().get(reqwest::header::CONTENT_TYPE),
+            response.headers().get(reqwest::header::CONTENT_ENCODING)
+        );
+        let failure = match response.bytes().await {
+            Ok(bytes) => match decode_works_response(&bytes) {
+                Ok(body) => return Ok(body),
+                Err(mut failure) => {
+                    failure.message = format!(
+                        "{context}: {}; {metadata}; {} bytes received",
+                        failure.message,
+                        bytes.len()
+                    );
+                    failure
+                }
+            },
+            Err(error) => DecodeFailure {
+                message: format!(
+                    "{context}: response body read failed; {metadata}; {}",
+                    error_details(&error.without_url())
+                ),
+                retryable: true,
+            },
+        };
+        if !failure.retryable {
+            return Err(failure.message);
+        }
+        if retry == MAX_RETRIES {
+            return Err(format!("{}; exhausted {} attempts", failure.message, retry + 1));
+        }
+        let delay = Duration::from_secs(2 * 2_u64.pow(retry));
+        eprintln!(
+            "{}; retrying the same page in {}s (retry {}/{MAX_RETRIES})",
+            failure.message,
+            delay.as_secs(),
+            retry + 1
+        );
+        tokio::time::sleep(delay).await;
+    }
+    unreachable!("each page either succeeds or returns its final failure")
 }
 
 #[cfg(test)]
