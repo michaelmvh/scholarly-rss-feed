@@ -17,12 +17,15 @@ pub(crate) fn merge_works(primary: Vec<Work>, secondary: Vec<Work>) -> Vec<Work>
     let mut works: Vec<Work> = Vec::new();
 
     for work in primary.into_iter().chain(secondary) {
+        let keys = version_keys(&work);
         if let Some(index) = work.id.as_ref().and_then(|id| seen.get(id)).copied() {
             merge_work_version(&mut works[index], work);
+            for key in keys {
+                version_groups.entry(key).or_insert(index);
+            }
             continue;
         }
 
-        let keys = version_keys(&work);
         let group = keys.iter().find_map(|key| version_groups.get(key).copied());
 
         match group {
@@ -64,20 +67,43 @@ fn sort_date(work: &Work) -> &str {
         .unwrap_or("")
 }
 
-pub(crate) fn version_keys(work: &Work) -> Vec<VersionKey> {
-    let mut keys = Vec::new();
-
+pub(crate) fn doi_identifiers(work: &Work) -> Vec<String> {
+    let mut identifiers = Vec::new();
     if let Some(doi) = work.doi.as_deref().map(normalize_doi) {
         if !doi.is_empty() {
-            keys.push(VersionKey::Doi(doi));
+            identifiers.push(doi);
         }
     }
     if let Some(arxiv_id) = work.id.as_deref().and_then(|id| id.strip_prefix("arxiv:")) {
-        keys.push(VersionKey::Doi(format!(
+        identifiers.push(format!(
             "10.48550/arxiv.{}",
             arxiv_id.to_ascii_lowercase()
-        )));
+        ));
     }
+    for link in &work.alternate_links {
+        let Ok(url) = url::Url::parse(link) else {
+            continue;
+        };
+        if !matches!(url.scheme(), "http" | "https")
+            || !matches!(url.host_str(), Some("doi.org" | "dx.doi.org"))
+            || !url.username().is_empty()
+            || url.password().is_some()
+        {
+            continue;
+        }
+        let doi = normalize_doi(url.path().trim_start_matches('/'));
+        if doi.starts_with("10.") && doi.contains('/') && !identifiers.contains(&doi) {
+            identifiers.push(doi);
+        }
+    }
+    identifiers
+}
+
+pub(crate) fn version_keys(work: &Work) -> Vec<VersionKey> {
+    let mut keys = doi_identifiers(work)
+        .into_iter()
+        .map(VersionKey::Doi)
+        .collect::<Vec<_>>();
 
     let title = work
         .title
@@ -376,7 +402,7 @@ fn author_name_tokens(name: &str) -> Vec<String> {
         .collect()
 }
 
-fn normalize_doi(doi: &str) -> String {
+pub(crate) fn normalize_doi(doi: &str) -> String {
     let doi = doi.trim().to_lowercase();
     let doi = doi
         .trim_start_matches("https://")
@@ -496,6 +522,44 @@ fn version_quality(work: &Work) -> (bool, bool, bool, &str) {
 mod tests {
     use super::*;
     use crate::openalex::{Author, Authorship};
+
+    #[test]
+    fn doi_aliases_added_to_an_existing_id_are_indexed_for_later_versions() {
+        let original: Work = serde_json::from_value(serde_json::json!({
+            "id": "W1", "doi": "https://doi.org/10.1000/published", "title": "Published"
+        })).unwrap();
+        let mut enriched = original.clone();
+        enriched.alternate_links = vec!["https://doi.org/10.1000/preprint".to_string()];
+        let mut preprint: Work = serde_json::from_value(serde_json::json!({
+            "id": "preprint", "doi": "https://doi.org/10.1000/preprint", "title": "Old title"
+        })).unwrap();
+        let source = crate::provenance::DiscoverySource::curated_collection(
+            "example".to_string(), "Example".to_string(), "https://example.org".to_string(),
+        );
+        preprint.add_discovery_source(source.clone());
+        let merged = merge_works(vec![original], vec![enriched, preprint]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].discovery_sources, vec![source]);
+        assert!(doi_identifiers(&merged[0]).contains(&"10.1000/preprint".to_string()));
+    }
+
+    #[test]
+    fn only_doi_resolver_links_become_doi_aliases() {
+        let mut work = work_with_authors(&["Ada Lovelace"]);
+        work.alternate_links = vec![
+            "https://doi.org/10.1000/ALIAS".to_string(),
+            "http://dx.doi.org/10.1000/alias/".to_string(),
+            "https://example.org/10.1000/unrelated".to_string(),
+            "https://doi.org/not-a-doi".to_string(),
+            "https://user:password@doi.org/10.1000/private".to_string(),
+            "ftp://doi.org/10.1000/ftp".to_string(),
+        ];
+        assert_eq!(doi_identifiers(&work), vec!["10.1000/alias"]);
+        let arxiv: Work = serde_json::from_value(serde_json::json!({
+            "id": "arxiv:2402.10516"
+        })).unwrap();
+        assert_eq!(doi_identifiers(&arxiv), vec!["10.48550/arxiv.2402.10516"]);
+    }
 
     fn work_with_authors(names: &[&str]) -> Work {
         Work {
