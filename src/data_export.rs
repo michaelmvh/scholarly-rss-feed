@@ -152,21 +152,30 @@ fn read(path: &Path) -> Result<Vec<u8>, String> {
 }
 
 fn validate_article(article: &Article) -> Result<(), String> {
-    if !valid_id(&article.id)
-        || article.identity_keys.is_empty()
-        || article.title.trim().is_empty()
-        || article
-            .identity_keys
-            .iter()
-            .any(|key| key.trim().is_empty())
-        || article
-            .authors
-            .iter()
-            .any(|author| author.key.is_empty() || author.name.trim().is_empty())
-        || !["day", "month", "year", "unknown"]
-            .contains(&article.publication_date_precision.as_str())
+    let invalid = |field: &str| format!("Article {:?}: invalid {field}.", article.id);
+    if !valid_id(&article.id) {
+        return Err(invalid("id"));
+    }
+    if article.identity_keys.is_empty()
+        || article.identity_keys.iter().any(|key| key.trim().is_empty())
     {
-        return Err("Invalid article identity, title, author, or date precision.".to_string());
+        return Err(invalid("identity_keys"));
+    }
+    if article.title.trim().is_empty() {
+        return Err(invalid("title"));
+    }
+    for (index, author) in article.authors.iter().enumerate() {
+        if author.key.is_empty() {
+            return Err(invalid(&format!("authors[{index}].key")));
+        }
+        if author.name.trim().is_empty() {
+            return Err(invalid(&format!("authors[{index}].name")));
+        }
+    }
+    if !["day", "month", "year", "unknown"]
+        .contains(&article.publication_date_precision.as_str())
+    {
+        return Err(invalid("publication_date_precision"));
     }
     for date in article
         .publication_date
@@ -247,7 +256,8 @@ fn load_archive(previous: Option<&Path>) -> Result<BTreeMap<String, Article>, St
             return Err("Previous article shard count/schema mismatch.".to_string());
         }
         for article in shard.articles {
-            validate_article(&article)?;
+            validate_article(&article)
+                .map_err(|error| format!("Previous shard {:?}: {error}", entry.path))?;
             if !article.id.starts_with(bucket)
                 || archive.contains_key(&article.id)
                 || article
@@ -330,7 +340,8 @@ fn identify(
             article = preferred;
         }
     }
-    validate_article(&article)?;
+    validate_article(&article)
+        .map_err(|error| format!("{error} Source record: {:?}.", publication.id))?;
     for key in &article.identity_keys {
         index.insert(key.clone(), id.clone());
     }
@@ -440,7 +451,8 @@ fn export(
         let mut article_ids = Vec::new();
         let mut authors: BTreeMap<String, AuthorOption> = BTreeMap::new();
         for (publication, keys) in feed.publications.iter().zip(&keys) {
-            let id = identify(publication, keys, &mut archive, &mut index, &mut current)?;
+            let id = identify(publication, keys, &mut archive, &mut index, &mut current)
+                .map_err(|error| format!("Feed {name:?}: {error}"))?;
             if matches.contains_key(&id) {
                 return Err(format!("Duplicate article identity in {name}."));
             }
@@ -595,6 +607,123 @@ mod tests {
         }
     }
 
+    fn punctuation_byline_input() -> Input {
+        let mut enriched: crate::openalex::Work = serde_json::from_value(serde_json::json!({
+            "id": "https://openalex.org/W7168259423",
+            "doi": "https://doi.org/10.48550/arxiv.2607.09998",
+            "title": "Vilya-1: An all-atom foundation model for macrocycle structure prediction and design",
+            "publication_date": "2026-07-10",
+            "primary_location": {"pdf_url": "https://arxiv.org/pdf/2607.09998"},
+            "authorships": [
+                {"author": {"display_name": "Vilya Research"}},
+                {"author": {"id": "https://openalex.org/A5140784106", "display_name": ":"}, "raw_author_name": ":"},
+                {"author": {"display_name": "Pascal Sturmfels"}}
+            ]
+        }))
+        .unwrap();
+        enriched.add_discovery_source(DiscoverySource::openalex());
+        let curated: crate::openalex::Work = serde_json::from_value(serde_json::json!({
+            "id": "arxiv:2607.09998",
+            "title": enriched.title,
+            "publication_date": "2026-07-01",
+            "primary_location": {"landing_page_url": "https://arxiv.org/abs/2607.09998"},
+            "authorships": [{"raw_author_name": "Vilya Research: Pascal Sturmfels"}]
+        }))
+        .unwrap();
+        let works = crate::works::merge_works(vec![enriched], vec![curated]);
+        assert_eq!(works.len(), 1);
+        assert_eq!(works[0].id.as_deref(), Some("https://openalex.org/W7168259423"));
+        let mut input = sample("punctuation-byline", false);
+        input.keys = vec![BTreeSet::from([
+            works[0].id.clone().unwrap(),
+            works[0].doi.clone().unwrap(),
+        ])];
+        input.feed.publications = vec![crate::work_to_publication(&works[0], &[])];
+        input
+    }
+
+    #[test]
+    fn punctuation_only_enriched_byline_does_not_abort_export() {
+        let output = directory();
+        export(
+            &ExportArgs::new(output.clone(), None),
+            "feed",
+            BTreeMap::from([("feed".to_string(), punctuation_byline_input())]),
+        )
+        .unwrap();
+        let archive = load_archive(Some(&output)).unwrap();
+        assert_eq!(archive.len(), 1);
+        let article = archive.values().next().unwrap();
+        assert_eq!(
+            article
+                .authors
+                .iter()
+                .map(|author| author.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Vilya Research", "Pascal Sturmfels"]
+        );
+        assert!(article.identity_keys.contains("https://openalex.org/W7168259423"));
+        fs::remove_dir_all(output).unwrap();
+    }
+
+    #[test]
+    fn article_validation_reports_the_invalid_field() {
+        let input = sample("one", false);
+        let mut archive = BTreeMap::new();
+        let id = identify(
+            &input.feed.publications[0],
+            &input.keys[0],
+            &mut archive,
+            &mut BTreeMap::new(),
+            &mut BTreeSet::new(),
+        )
+        .unwrap();
+        for field in [
+            "id",
+            "identity_keys",
+            "title",
+            "authors[0].key",
+            "authors[0].name",
+            "publication_date_precision",
+        ] {
+            let mut article = archive[&id].clone();
+            match field {
+                "id" => article.id = "invalid".to_string(),
+                "identity_keys" => article.identity_keys.clear(),
+                "title" => article.title = " \n ".to_string(),
+                "authors[0].key" => article.authors[0].key.clear(),
+                "authors[0].name" => article.authors[0].name = " \t ".to_string(),
+                "publication_date_precision" => article.publication_date_precision.clear(),
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                validate_article(&article).unwrap_err(),
+                format!("Article {:?}: invalid {field}.", article.id)
+            );
+        }
+        let mut article = archive[&id].clone();
+        article.identity_keys.insert(" ".to_string());
+        assert!(validate_article(&article).unwrap_err().contains("identity_keys"));
+    }
+
+    #[test]
+    fn invalid_byline_error_identifies_feed_and_source_before_output() {
+        let output = directory();
+        let mut input = sample("one", false);
+        input.feed.publications[0].authors[0].filter_id.clear();
+        let error = export(
+            &ExportArgs::new(output.clone(), None),
+            "feed",
+            BTreeMap::from([("feed".to_string(), input)]),
+        )
+        .unwrap_err();
+        assert!(error.contains("Feed \"feed\""));
+        assert!(error.contains("authors[0].key"));
+        assert!(error.contains(&digest(b"https://example.org/one")));
+        assert!(error.contains("Source record: Some(\"one\")"));
+        assert!(!output.exists());
+    }
+
     #[test]
     #[ignore = "writes synthetic JSON to GSRF_TEST_EXPORT_DIR"]
     fn export_fixture() {
@@ -617,6 +746,9 @@ mod tests {
         let required = sample("required", false);
         input.feed.publications.extend(required.feed.publications);
         input.keys.extend(required.keys);
+        let punctuation = punctuation_byline_input();
+        input.feed.publications.extend(punctuation.feed.publications);
+        input.keys.extend(punctuation.keys);
         export(
             &ExportArgs::new(output, None),
             "example",
