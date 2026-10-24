@@ -14,7 +14,7 @@ mod works;
 
 use crate::config::{Config, FeedConfig};
 use crate::openalex::{
-    normalize_id, Author, AuthorsResponse, SourceRecord, SourcesResponse, Work, WorksResponse,
+    normalize_id, Author, AuthorsResponse, SourceRecord, SourcesResponse, Work,
     API_BASE,
 };
 use crate::provenance::DiscoverySource;
@@ -1608,8 +1608,10 @@ async fn fetch_openalex_works(request: &FeedRequest) -> Result<Vec<Work>, String
         fetch_works_for_filter(author_filter),
         fetch_works_for_filter(journal_filter),
     );
-    let mut author_works = author_works?;
-    let mut journal_works = journal_works?;
+    let mut author_works =
+        author_works.map_err(|error| format!("OpenAlex author query: {error}"))?;
+    let mut journal_works =
+        journal_works.map_err(|error| format!("OpenAlex journal query: {error}"))?;
     mark_feed_authors(&mut author_works, &request.author_ids);
     mark_feed_authors(&mut journal_works, &request.author_ids);
 
@@ -1662,19 +1664,13 @@ async fn fetch_works_for_filter_from(
         }
         let url = url::Url::parse_with_params(&format!("{api_base}/works"), &pairs)
             .map_err(|error| format!("Failed to build OpenAlex URL: {error}"))?;
-        let response = openalex::request(client, url)?
-            .send()
-            .await
-            .map_err(openalex::request_error)?
-            .error_for_status()
-            .map_err(openalex::request_error)?;
-        let mut body = response
-            .json::<WorksResponse>()
-            .await
-            .map_err(|error| format!("Failed to parse OpenAlex response: {error}"))?;
+        let mut body = openalex::works_page(client, url, seen_cursors.len(), works.len()).await?;
         let next_cursor = body
             .meta
-            .ok_or_else(|| "OpenAlex response did not contain pagination metadata.".to_string())?
+            .ok_or_else(|| format!(
+                "OpenAlex works page {} did not contain pagination metadata.",
+                seen_cursors.len()
+            ))?
             .next_cursor;
         if works.len() + body.results.len() > max_works {
             return Err(format!(
@@ -2079,24 +2075,40 @@ mod tests {
     fn spawn_json_server(
         responses: Vec<&'static str>,
     ) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        spawn_http_server(
+            responses.into_iter()
+                .map(|body| http_response("200 OK", "application/json", body))
+                .collect(),
+        )
+    }
+
+    fn http_response(status: &str, content_type: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    fn spawn_http_server(
+        responses: Vec<String>,
+    ) -> (String, std::thread::JoinHandle<Vec<String>>) {
         let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
         let address = format!("http://{}", listener.local_addr().unwrap());
         let handle = std::thread::spawn(move || {
             responses
                 .into_iter()
-                .map(|body| {
+                .map(|response| {
                     let (mut stream, _) = listener.accept().unwrap();
-                    let mut request = [0_u8; 4096];
-                    let length = stream.read(&mut request).unwrap();
-                    let request = String::from_utf8_lossy(&request[..length]).into_owned();
-                    write!(
-                        stream,
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        body.len(),
-                        body
-                    )
-                    .unwrap();
-                    request
+                    stream.set_read_timeout(Some(StdDuration::from_secs(5))).unwrap();
+                    let mut request = Vec::new();
+                    while !request.ends_with(b"\r\n\r\n") {
+                        let mut byte = [0];
+                        stream.read_exact(&mut byte).unwrap();
+                        request.push(byte[0]);
+                        assert!(request.len() < 8192);
+                    }
+                    stream.write_all(response.as_bytes()).unwrap();
+                    String::from_utf8(request).unwrap()
                 })
                 .collect()
         });
@@ -3057,6 +3069,71 @@ optional = true
         assert!(requests
             .iter()
             .all(|request| request.contains("per_page=100")));
+    }
+
+    #[tokio::test]
+    async fn openalex_retries_interrupted_and_truncated_pages_without_advancing_the_cursor() {
+        let (api_base, server) = spawn_http_server(vec![
+            http_response("200 OK", "application/json",
+                r#"{"results":[{"id":"W1"}],"meta":{"next_cursor":"next-page"}}"#),
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 999\r\nConnection: close\r\n\r\n{\"results\":[".to_string(),
+            http_response("200 OK", "application/json", r#"{"results":["#),
+            http_response("200 OK", "application/json",
+                r#"{"results":[{"id":"W2"}],"meta":{"next_cursor":null}}"#),
+        ]);
+        let works = fetch_works_for_filter_from(&CLIENT, &api_base, "author.id:A1".into(), 10)
+            .await
+            .unwrap();
+        assert_eq!(ids(&works), vec![Some("W1".into()), Some("W2".into())]);
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 4);
+        assert!(requests[0].contains("cursor=*"));
+        assert!(requests[1].contains("cursor=next-page"));
+        assert_eq!(requests[1], requests[2]);
+        assert_eq!(requests[2], requests[3]);
+    }
+
+    #[tokio::test]
+    async fn openalex_decode_failures_include_context_and_exhaust_retries() {
+        let response = http_response("200 OK", "application/json", "{");
+        let (api_base, server) = spawn_http_server(vec![response; 3]);
+        let url = url::Url::parse(&format!(
+            "{api_base}/works?mailto=fixture@example.org&api_key=fixture-only"
+        )).unwrap();
+        let error = openalex::works_page(&CLIENT, url, 7, 600).await.unwrap_err();
+        assert!(error.contains("page 7 (600 records received)"), "{error}");
+        assert!(error.contains("JSON Eof"));
+        assert!(error.contains("HTTP 200"));
+        assert!(error.contains("application/json"));
+        assert!(error.contains("1 bytes received"));
+        assert!(error.contains("exhausted 3 attempts"));
+        assert!(!error.contains("fixture@example.org"));
+        assert!(!error.contains("fixture-only"));
+        assert_eq!(server.join().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn openalex_schema_html_and_http_errors_fail_without_retrying_or_dumping_bodies() {
+        for (status, content_type, body, expected) in [
+            ("200 OK", "application/json",
+                r#"{"results":[{"id":"W1","authorships":[{"author":{"display_name":42}}]}],"meta":{"next_cursor":null}}"#,
+                "results[0].authorships[0].author.display_name"),
+            ("200 OK", "text/html", "<html>PRIVATE_BODY_MARKER</html>", "JSON Syntax"),
+            ("200 OK", "application/json",
+                r#"{"results":[],"meta":{"next_cursor":null}} trailing"#, "after the response"),
+            ("429 Too Many Requests", "application/json", r#"{"error":"PRIVATE_BODY_MARKER"}"#, "rate or usage budget"),
+            ("401 Unauthorized", "application/json", r#"{"error":"PRIVATE_BODY_MARKER"}"#, "authorization failed"),
+            ("503 Service Unavailable", "text/html", "PRIVATE_BODY_MARKER", "503"),
+        ] {
+            let (api_base, server) = spawn_http_server(vec![http_response(status, content_type, body)]);
+            let error = fetch_works_for_filter_from(&CLIENT, &api_base, "author.id:A1".into(), 10)
+                .await
+                .unwrap_err();
+            assert!(error.contains(expected), "{error}");
+            assert!(error.contains("page 1 (0 records received)"));
+            assert!(!error.contains("PRIVATE_BODY_MARKER"));
+            assert_eq!(server.join().unwrap().len(), 1);
+        }
     }
 
     #[tokio::test]

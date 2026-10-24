@@ -381,7 +381,9 @@ pub(crate) async fn run(args: &ExportArgs, config_path: &Path) -> Result<(), Str
         })?
         .ok_or_else(|| format!("Feed {name} did not resolve."))?;
         println!("Collecting JSON data for {name}");
-        let works = crate::fetch_works(&request, RefreshPolicy::RequireFresh).await?;
+        let works = crate::fetch_works(&request, RefreshPolicy::RequireFresh)
+            .await
+            .map_err(|error| format!("Feed {name:?} discovery failed: {error}"))?;
         let keys = works
             .iter()
             .map(|work| {
