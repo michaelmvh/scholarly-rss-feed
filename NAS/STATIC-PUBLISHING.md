@@ -189,6 +189,11 @@ Failed export/validation leaves the public site unchanged. Failed staging direct
 kept under their specific `state/work/run-...` paths. Inspect them before deleting only that
 attempt, and monitor disk space during repeated failures.
 
+When discovery joins previously separate retained versions, the exporter consolidates their
+source identities and keeps the old article IDs as `canonical_id` aliases. Deploy the reader's
+alias-aware schema, validation, and rendering before publishing data from this collector.
+Do not clear the archive to resolve an identity collision; its retained IDs preserve old URLs.
+
 Dirty checkouts and unpushed commits are never reset automatically. Failed promotion retains
 previous data in that attempt's `previous-data` directory. Inspect the checkout or failed
 GitHub workflow before retrying. Recovery Git commands can run in the publisher image through
