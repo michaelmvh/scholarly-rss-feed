@@ -30,7 +30,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: michaelmvh/reading-site
-          ref: 488c8cfb027040bae1e43703d8066566cb35c07c
+          ref: 3d48a1b36e44ee411c09555c711de62925c3603d
           path: reader-contract
           persist-credentials: false
       - run: npm ci --ignore-scripts
@@ -42,6 +42,9 @@ jobs:
           DATA_DIR: ${{ runner.temp }}/article-data
           SITE_URL: http://127.0.0.1:8080/
       - run: npx playwright install --with-deps chromium
+        working-directory: reader-contract
+      - name: Build the reader's matching browser fixtures
+        run: npm run build:fixture
         working-directory: reader-contract
       - run: npm run test:browser
         working-directory: reader-contract

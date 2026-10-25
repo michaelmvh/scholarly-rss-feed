@@ -35,6 +35,8 @@ struct Author {
 #[serde(deny_unknown_fields)]
 struct Article {
     id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    canonical_id: Option<String>,
     identity_keys: BTreeSet<String>,
     title: String,
     link: Option<String>,
@@ -104,6 +106,7 @@ struct Shard {
     articles: Vec<Article>,
 }
 
+#[derive(Clone)]
 struct Input {
     feed: crate::reader::Feed,
     keys: Vec<BTreeSet<String>>,
@@ -186,8 +189,20 @@ fn validate_article(article: &Article) -> Result<(), String> {
     if !valid_id(&article.id) {
         return Err(invalid("id"));
     }
-    if article.identity_keys.is_empty()
-        || article.identity_keys.iter().any(|key| key.trim().is_empty())
+    if let Some(canonical_id) = &article.canonical_id {
+        if !valid_id(canonical_id)
+            || canonical_id == &article.id
+            || !article.identity_keys.is_empty()
+        {
+            return Err(invalid("canonical_id"));
+        }
+    } else if article.identity_keys.is_empty() {
+        return Err(invalid("identity_keys"));
+    }
+    if article
+        .identity_keys
+        .iter()
+        .any(|key| key.trim().is_empty())
     {
         return Err(invalid("identity_keys"));
     }
@@ -228,6 +243,23 @@ fn validate_article(article: &Article) -> Result<(), String> {
         )
     {
         article_url(link)?;
+    }
+    Ok(())
+}
+
+fn validate_aliases(archive: &BTreeMap<String, Article>) -> Result<(), String> {
+    for article in archive.values() {
+        if let Some(id) = &article.canonical_id {
+            if !archive
+                .get(id)
+                .is_some_and(|target| target.canonical_id.is_none())
+            {
+                return Err(format!(
+                    "Article {:?}: canonical_id must reference an existing canonical article.",
+                    article.id
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -293,6 +325,7 @@ fn load_archive(previous: Option<&Path>) -> Result<BTreeMap<String, Article>, St
             archive.insert(article.id.clone(), article);
         }
     }
+    validate_aliases(&archive)?;
     Ok(archive)
 }
 
@@ -301,7 +334,7 @@ fn identify(
     keys: &BTreeSet<String>,
     archive: &mut BTreeMap<String, Article>,
     index: &mut BTreeMap<String, String>,
-    current: &mut BTreeSet<String>,
+    current: &mut BTreeMap<String, usize>,
 ) -> Result<String, String> {
     if keys.is_empty() {
         return Err("A publication has no stable identity.".to_string());
@@ -311,18 +344,14 @@ fn identify(
         .filter_map(|key| index.get(key))
         .cloned()
         .collect::<BTreeSet<_>>();
-    if matches.len() > 1 {
-        return Err(
-            "Multiple retained identities match one record; resolve the archive before publishing."
-                .to_string(),
-        );
-    }
     let id = matches
-        .into_iter()
-        .next()
+        .iter()
+        .min_by_key(|id| current.get(*id).copied().unwrap_or(usize::MAX))
+        .cloned()
         .unwrap_or_else(|| digest(keys.first().expect("identity exists").as_bytes()));
     let mut article = Article {
         id: id.clone(),
+        canonical_id: None,
         identity_keys: keys.clone(),
         title: publication.title.clone(),
         link: publication.link.clone(),
@@ -344,33 +373,70 @@ fn identify(
         curated_categories: publication.curated_categories.clone(),
     };
     if let Some(old) = archive.get(&id) {
-        article
-            .identity_keys
-            .extend(old.identity_keys.iter().cloned());
-        if current.contains(&id) {
+        if current.contains_key(&id) {
             let mut preferred = old.clone();
-            preferred.identity_keys = article.identity_keys;
+            if preferred.collection_date.is_none() {
+                preferred.collection_date = article.collection_date;
+            }
+            preferred.identity_keys.extend(article.identity_keys);
             preferred
                 .discovery_sources
                 .extend(article.discovery_sources);
-            preferred.discovery_sources.sort();
-            preferred.discovery_sources.dedup();
             preferred
                 .curated_categories
                 .extend(article.curated_categories);
-            preferred.curated_categories.sort();
-            preferred.curated_categories.dedup();
             article = preferred;
         }
     }
+    for matched in &matches {
+        let old = &archive[matched];
+        article
+            .identity_keys
+            .extend(old.identity_keys.iter().cloned());
+        article
+            .discovery_sources
+            .extend(old.discovery_sources.iter().cloned());
+        article
+            .curated_categories
+            .extend(old.curated_categories.iter().cloned());
+        if article.collection_date.is_none() {
+            article.collection_date = old.collection_date.clone();
+        }
+    }
+    article.curated_categories.sort();
+    article.curated_categories.dedup();
     normalize_article_urls(&mut article)
-        .and_then(|()| validate_article(&article))
+        .and_then(|()| {
+            article.discovery_sources.sort();
+            article.discovery_sources.dedup();
+            validate_article(&article)
+        })
         .map_err(|error| format!("{error} Source record: {:?}.", publication.id))?;
+    if matches.len() > 1 {
+        // Retain old URLs, but give every source identity a single canonical owner.
+        for old in archive.values_mut() {
+            if matches.contains(&old.id) && old.id != id {
+                eprintln!(
+                    "Reconciling retained article {} into {id}; preserving its article URL as an alias.",
+                    old.id
+                );
+                old.canonical_id = Some(id.clone());
+                old.identity_keys.clear();
+            } else if old
+                .canonical_id
+                .as_ref()
+                .is_some_and(|target| matches.contains(target))
+            {
+                old.canonical_id = Some(id.clone());
+            }
+        }
+    }
     for key in &article.identity_keys {
         index.insert(key.clone(), id.clone());
     }
     archive.insert(id.clone(), article);
-    current.insert(id.clone());
+    let priority = current.len();
+    current.entry(id.clone()).or_insert(priority);
     Ok(id)
 }
 
@@ -454,7 +520,7 @@ fn export(
                 .map(|key| (key.clone(), article.id.clone()))
         })
         .collect::<BTreeMap<_, _>>();
-    let mut current = BTreeSet::new();
+    let mut current = BTreeMap::new();
     let mut feeds = Vec::new();
     // Prefer the default feed's canonical metadata, not whichever feed sorts last.
     let mut order = vec![default.to_string()];
@@ -473,15 +539,12 @@ fn export(
         if feed.publications.is_empty() || feed.publications.len() != keys.len() {
             return Err(format!("Empty or mismatched required feed: {name}."));
         }
-        let mut matches = BTreeMap::new();
+        let mut matches: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut article_ids = Vec::new();
         let mut authors: BTreeMap<String, AuthorOption> = BTreeMap::new();
         for (publication, keys) in feed.publications.iter().zip(&keys) {
             let id = identify(publication, keys, &mut archive, &mut index, &mut current)
                 .map_err(|error| format!("Feed {name:?}: {error}"))?;
-            if matches.contains_key(&id) {
-                return Err(format!("Duplicate article identity in {name}."));
-            }
             let mut matched = BTreeSet::new();
             for author in publication
                 .authors
@@ -498,8 +561,13 @@ fn export(
                         default_selected: !author.optional,
                     });
             }
-            matches.insert(id.clone(), matched.into_iter().collect());
-            article_ids.push(id);
+            let associations = matches.entry(id.clone()).or_insert_with(|| {
+                article_ids.push(id);
+                Vec::new()
+            });
+            associations.extend(matched);
+            associations.sort();
+            associations.dedup();
         }
         let sources = feed
             .paper_sources
@@ -523,6 +591,23 @@ fn export(
             matches,
             sources,
         });
+    }
+    validate_aliases(&archive)?;
+    for feed in &mut feeds {
+        let mut matches: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut ids = Vec::new();
+        for old in &feed.article_ids {
+            let id = archive[old].canonical_id.as_ref().unwrap_or(old);
+            let associations = matches.entry(id.clone()).or_insert_with(|| {
+                ids.push(id.clone());
+                Vec::new()
+            });
+            associations.extend(feed.matches[old].iter().cloned());
+            associations.sort();
+            associations.dedup();
+        }
+        feed.article_ids = ids;
+        feed.matches = matches;
     }
     feeds.sort_by(|a, b| a.id.cmp(&b.id));
     let mut buckets: BTreeMap<String, Vec<Article>> = BTreeMap::new();
@@ -578,16 +663,19 @@ fn export(
 mod tests {
     use super::*;
     use crate::reader::{Author as ReaderAuthor, Feed as ReaderFeed, PaperSourceOption};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn directory() -> PathBuf {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
         std::env::temp_dir().join(format!(
-            "data-export-{}-{}",
+            "data-export-{}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
         ))
     }
     fn sample(id: &str, optional: bool) -> Input {
@@ -732,7 +820,7 @@ mod tests {
             &input.keys[0],
             &mut archive,
             &mut BTreeMap::new(),
-            &mut BTreeSet::new(),
+            &mut BTreeMap::new(),
         )
         .unwrap();
         for field in [
@@ -803,13 +891,25 @@ mod tests {
         let mut required = sample("required", false);
         required.feed.publications[0].pdf_url =
             Some("https://example.org/Supplement 1/paper.pdf".to_string());
+        let previous = directory();
+        let mut versions = required.clone();
+        let preprint = sample("preprint-version", false);
+        versions.feed.publications.extend(preprint.feed.publications);
+        versions.keys.extend(preprint.keys.clone());
+        export(
+            &ExportArgs::new(previous.clone(), None),
+            "example",
+            BTreeMap::from([("example".to_string(), versions)]),
+        )
+        .unwrap();
+        required.keys[0].extend(preprint.keys.into_iter().flatten());
         input.feed.publications.extend(required.feed.publications);
         input.keys.extend(required.keys);
         let punctuation = punctuation_byline_input();
         input.feed.publications.extend(punctuation.feed.publications);
         input.keys.extend(punctuation.keys);
         export(
-            &ExportArgs::new(output, None),
+            &ExportArgs::new(output, Some(previous.clone())),
             "example",
             BTreeMap::from([
                 ("example".to_string(), input),
@@ -817,6 +917,7 @@ mod tests {
             ]),
         )
         .unwrap();
+        fs::remove_dir_all(previous).unwrap();
     }
 
     #[tokio::test]
@@ -1001,7 +1102,7 @@ mod tests {
     fn provider_version_aliases_retain_identity_and_author_defaults_are_feed_specific() {
         let mut archive = BTreeMap::new();
         let mut index = BTreeMap::new();
-        let mut seen = BTreeSet::new();
+        let mut seen = BTreeMap::new();
         let input = sample("one", true);
         let first = identify(
             &input.feed.publications[0],
@@ -1048,6 +1149,173 @@ mod tests {
             1
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bridged_retained_versions_preserve_urls_and_reconcile_prior_feed_membership() {
+        let previous = directory();
+        let output = directory();
+        let next = directory();
+        let mut arxiv = sample("arxiv", false);
+        arxiv.keys[0] = BTreeSet::from([
+            "https://arxiv.org/abs/2603.02406".to_string(),
+            "https://doi.org/10.48550/arxiv.2603.02406".to_string(),
+            "https://openalex.org/W7133495554".to_string(),
+        ]);
+        let mut biorxiv = sample("biorxiv", true);
+        biorxiv.keys[0] = BTreeSet::from([
+            "biorxiv:10.64898/2026.03.02.708991v3".to_string(),
+            "https://doi.org/10.64898/2026.03.02.708991".to_string(),
+        ]);
+        biorxiv.feed.publications[0].discovery_sources = vec![DiscoverySource::curated_collection(
+            "example".to_string(),
+            "Example".to_string(),
+            "https://example.org".to_string(),
+        )];
+        biorxiv.feed.publications[0].collection_date = Some(CollectionDate {
+            date: "2026-10-01".to_string(),
+            commit_url: "https://example.org/commit".to_string(),
+        });
+        let mut main = arxiv;
+        main.feed.publications.extend(biorxiv.feed.publications);
+        main.keys.extend(biorxiv.keys);
+        export(
+            &ExportArgs::new(previous.clone(), None),
+            "main",
+            BTreeMap::from([("main".to_string(), main.clone())]),
+        )
+        .unwrap();
+        let before = load_archive(Some(&previous)).unwrap();
+        let mut merged = sample("https://openalex.org/W7133570701", false);
+        merged.feed.publications[0].link = Some("https://arxiv.org/abs/2603.02406".to_string());
+        merged.keys[0] = main.keys.iter().flatten().cloned().collect();
+        merged.keys[0].insert("https://openalex.org/W7133570701".to_string());
+        let repeated = sample("second-match", true);
+        merged.feed.publications.extend(repeated.feed.publications);
+        merged.keys.push(main.keys[1].clone());
+        export(
+            &ExportArgs::new(output.clone(), Some(previous.clone())),
+            "main",
+            BTreeMap::from([
+                ("main".to_string(), main),
+                ("protein-design".to_string(), merged),
+            ]),
+        )
+        .unwrap();
+        let after = load_archive(Some(&output)).unwrap();
+        assert_eq!(
+            before.keys().collect::<Vec<_>>(),
+            after.keys().collect::<Vec<_>>()
+        );
+        let canonical = after
+            .values()
+            .find(|article| article.canonical_id.is_none())
+            .unwrap();
+        let alias = after
+            .values()
+            .find(|article| article.canonical_id.is_some())
+            .unwrap();
+        assert_eq!(alias.canonical_id.as_ref(), Some(&canonical.id));
+        assert!(canonical
+            .identity_keys
+            .contains("https://arxiv.org/abs/2603.02406"));
+        assert_eq!(canonical.title, "Paper <arxiv> & research");
+        assert!(alias.identity_keys.is_empty());
+        assert!(before
+            .values()
+            .all(|article| article.identity_keys.is_subset(&canonical.identity_keys)));
+        assert_eq!(canonical.discovery_sources.len(), 2);
+        assert!(canonical.collection_date.is_some());
+        let snapshot: Snapshot =
+            serde_json::from_slice(&fs::read(output.join("snapshot.json")).unwrap()).unwrap();
+        for feed in &snapshot.feeds {
+            assert_eq!(feed.article_ids, vec![canonical.id.clone()]);
+        }
+        assert_eq!(
+            snapshot.feeds[0].matches[&canonical.id],
+            vec!["arxiv", "biorxiv"]
+        );
+        assert_eq!(snapshot.feeds[1].matches[&canonical.id].len(), 2);
+        let mut reappearing = sample("old-version", false);
+        reappearing.keys[0] = before[&alias.id].identity_keys.clone();
+        export(
+            &ExportArgs::new(next.clone(), Some(output.clone())),
+            "main",
+            BTreeMap::from([("main".to_string(), reappearing)]),
+        )
+        .unwrap();
+        let repeated = load_archive(Some(&next)).unwrap();
+        assert_eq!(
+            repeated[&alias.id].canonical_id.as_ref(),
+            Some(&canonical.id)
+        );
+        assert!(canonical
+            .identity_keys
+            .is_subset(&repeated[&canonical.id].identity_keys));
+        for path in [previous, output, next] {
+            fs::remove_dir_all(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn subsequent_merges_flatten_aliases_and_keep_identity_ownership_unique() {
+        let mut archive = BTreeMap::new();
+        let mut index = BTreeMap::new();
+        let mut current = BTreeMap::new();
+        let mut inputs = vec![
+            sample("one", false),
+            sample("two", false),
+            sample("three", false),
+        ];
+        let ids = inputs
+            .iter()
+            .map(|input| {
+                identify(
+                    &input.feed.publications[0],
+                    &input.keys[0],
+                    &mut archive,
+                    &mut index,
+                    &mut current,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let third = ids[2].clone();
+        let two_keys = inputs[1].keys[0].clone();
+        inputs[0].keys[0].extend(two_keys);
+        let first_merge = identify(
+            &inputs[0].feed.publications[0],
+            &inputs[0].keys[0],
+            &mut archive,
+            &mut index,
+            &mut current,
+        )
+        .unwrap();
+        let all_keys = inputs[0].keys[0].clone();
+        inputs[2].keys[0].extend(all_keys);
+        current = BTreeMap::from([(third.clone(), 0)]);
+        let final_id = identify(
+            &inputs[2].feed.publications[0],
+            &inputs[2].keys[0],
+            &mut archive,
+            &mut index,
+            &mut current,
+        )
+        .unwrap();
+        assert_eq!(final_id, third);
+        assert_ne!(first_merge, final_id);
+        validate_aliases(&archive).unwrap();
+        assert!(index.values().all(|id| id == &final_id));
+        for article in archive.values() {
+            validate_article(article).unwrap();
+            if article.id != final_id {
+                assert_eq!(article.canonical_id.as_ref(), Some(&final_id));
+            }
+        }
+        archive.get_mut(&first_merge).unwrap().canonical_id = Some(digest(b"missing"));
+        assert!(validate_aliases(&archive)
+            .unwrap_err()
+            .contains("existing canonical article"));
     }
 
     #[test]
