@@ -304,7 +304,8 @@ credentials or silently truncate an anonymous export.
 Start in prepare-only mode: export and validate JSON locally without commits or pushes.
 Publish mode may update **only `data/`**, never reader source, workflows, `site/`, or `dist/`.
 Use a fresh staging directory and one commit per complete snapshot. Preserve dirty or
-unpushed work for inspection instead of resetting it.
+unpushed work for inspection instead of resetting it, except a publisher-only data snapshot
+stranded by a failed push, which the next run discards because its fresh export supersedes it.
 
 Reconcile concurrent reader-source changes before pushing and revalidate against the
 applicable schema. Fail explicitly on conflicts or incompatible contracts; never force-push

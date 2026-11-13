@@ -164,12 +164,41 @@ test("failed export/validation preserves the checkout; push/deploy failures rema
       assert.equal(f.git(["status", "--porcelain"]), "");
       assert.equal(f.git(["rev-list", "--count", "HEAD"]), ["export", "validate"].includes(phase) ? "1" : "2");
       assert.ok(!(await readdir(f.config.state)).includes("publisher.lock"));
-      if (phase === "push") {
-        f.fail(undefined);
-        await assert.rejects(f.run(), /Unpushed commits/);
-      }
     } finally { await rm(f.root, { recursive: true }); }
   }
+});
+
+test("a snapshot stranded by a failed push is discarded and the next run publishes fresh data", async () => {
+  const f = await setup();
+  try {
+    f.config.mode = "publish";
+    f.fail("push");
+    await assert.rejects(f.run(), /push failed/);
+    const strandedRevision = f.git(["rev-parse", "HEAD"]);
+    f.fail(undefined);
+    // Main moves on meanwhile, so a plain fast-forward from the stranded commit would fail.
+    f.updateUi();
+    await f.run();
+    const summary = JSON.parse(await readFile(path.join(f.config.state, "last-run.json"), "utf8"));
+    assert.equal(summary.status, "deployed");
+    assert.ok(f.log.some((message) => message.includes(`Discarded 1 unpushed data snapshot commit(s)`) && message.includes(strandedRevision)));
+    assert.equal(f.git(["rev-list", "--count", "origin/main..HEAD"]), "0");
+    // --is-ancestor exits non-zero (so the helper throws) when the stranded commit is gone from history.
+    assert.throws(() => f.git(["merge-base", "--is-ancestor", strandedRevision, "HEAD"]));
+    assert.equal(await readFile(path.join(f.config.state, "checkout/reader-ui.txt"), "utf8"), "independent UI update");
+  } finally { await rm(f.root, { recursive: true }); }
+});
+
+test("an unpushed commit that is not a publisher data snapshot still blocks publishing", async () => {
+  const f = await setup();
+  try {
+    f.config.mode = "publish";
+    await f.run();
+    await writeFile(path.join(f.config.state, "checkout/keep.txt"), "hand edit");
+    f.git(["commit", "-am", "Hand edit"]);
+    await assert.rejects(f.run(), /not a publisher data snapshot/);
+    assert.equal(await readFile(path.join(f.config.state, "checkout/keep.txt"), "utf8"), "hand edit");
+  } finally { await rm(f.root, { recursive: true }); }
 });
 
 test("guards bootstrap, dirty checkouts, unexpected remotes, concurrency, and cleanup boundaries", async () => {
