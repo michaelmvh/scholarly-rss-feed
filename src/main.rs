@@ -3543,6 +3543,20 @@ optional = true
     }
 
     #[tokio::test]
+    async fn openalex_connections_dropped_before_a_response_are_retried() {
+        let (api_base, server) = spawn_http_server(vec![
+            String::new(),
+            http_response("200 OK", "application/json",
+                r#"{"results":[{"id":"W1"}],"meta":{"next_cursor":null}}"#),
+        ]);
+        let works = fetch_works_for_filter_from(&CLIENT, &api_base, "author.id:A1".into(), 10)
+            .await
+            .unwrap();
+        assert_eq!(ids(&works), vec![Some("W1".into())]);
+        assert_eq!(server.join().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
     async fn openalex_refused_connections_are_retried_then_reported() {
         // Bind and immediately release a port so nothing is listening on it.
         let unused_port = StdTcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();

@@ -213,3 +213,29 @@ async fn refused_connections_are_retried_then_reported() {
     ).await.err().unwrap();
     assert!(error.contains("exhausted 3 attempts"), "{error}");
 }
+
+#[tokio::test]
+async fn connections_dropped_before_a_response_are_retried() {
+    // An empty response closes the connection without answering, like the NAS failure on 2026-11-13.
+    let (api_base, server) = spawn_http_server(vec![
+        String::new(),
+        http_response("200 OK", EMPTY_PAGE),
+    ]);
+    let response = fetch_page_from(
+        &reqwest::Client::new(), &api_base, "bioinformatics", "2026-11-11", "2026-11-13", 0,
+    ).await.unwrap();
+    assert!(response.collection.is_empty());
+    assert_eq!(server.join().unwrap(), 2);
+}
+
+#[tokio::test]
+async fn dropped_connection_errors_name_the_underlying_cause() {
+    let (api_base, server) = spawn_http_server(vec![String::new(); 3]);
+    let error = fetch_page_from(
+        &reqwest::Client::new(), &api_base, "bioinformatics", "2026-11-11", "2026-11-13", 0,
+    ).await.err().unwrap();
+    assert!(error.contains("exhausted 3 attempts"), "{error}");
+    // More than reqwest's bare "error sending request for url (...)".
+    assert!(error.split("error sending request").nth(1).is_some_and(|rest| rest.contains(": ")), "{error}");
+    assert_eq!(server.join().unwrap(), 3);
+}
