@@ -44,16 +44,17 @@ pub fn request_error(error: reqwest::Error) -> String {
     }
 }
 
-struct DecodeFailure {
+/// Why one attempt at a works page failed, and whether asking again could help.
+struct PageFailure {
     message: String,
     retryable: bool,
 }
 
-fn decode_works_response(bytes: &[u8]) -> Result<WorksResponse, DecodeFailure> {
+fn decode_works_response(bytes: &[u8]) -> Result<WorksResponse, PageFailure> {
     let mut deserializer = serde_json::Deserializer::from_slice(bytes);
     let response = serde_path_to_error::deserialize(&mut deserializer).map_err(|error| {
         let category = error.inner().classify();
-        DecodeFailure {
+        PageFailure {
             message: format!(
                 "JSON {category:?} error at {}: {}",
                 error.path(),
@@ -62,7 +63,7 @@ fn decode_works_response(bytes: &[u8]) -> Result<WorksResponse, DecodeFailure> {
             retryable: error.inner().is_eof(),
         }
     })?;
-    deserializer.end().map_err(|error| DecodeFailure {
+    deserializer.end().map_err(|error| PageFailure {
         message: format!("JSON {:?} error after the response: {error}", error.classify()),
         retryable: error.is_eof(),
     })?;
@@ -80,46 +81,24 @@ fn error_details(error: &(dyn std::error::Error + 'static)) -> String {
     details
 }
 
+/// A page whose body arrived cut off is usually fine on an immediate second request.
+const INCOMPLETE_BODY_FIRST_RETRY_DELAY: Duration = Duration::from_secs(2);
+
+/// Fetch one works page. Temporary server errors and cut-off bodies are retried on the same
+/// cursor; authorization (401/403), rate-limit (429), other HTTP errors and malformed JSON fail
+/// at once, because asking again would not change the answer.
 pub async fn works_page(
     client: &reqwest::Client,
     url: url::Url,
     page: usize,
     received: usize,
 ) -> Result<WorksResponse, String> {
-    const MAX_RETRIES: u32 = 2;
+    use crate::transient_http::MAX_RETRIES;
     let context = format!("OpenAlex works page {page} ({received} records received)");
     for retry in 0..=MAX_RETRIES {
-        let response = request(client, url.clone())?
-            .send()
-            .await
-            .map_err(|error| format!("{context}: {}", request_error(error.without_url())))?
-            .error_for_status()
-            .map_err(|error| format!("{context}: {}", request_error(error.without_url())))?;
-        let metadata = format!(
-            "HTTP {}, content-type {:?}, content-encoding {:?}",
-            response.status(),
-            response.headers().get(reqwest::header::CONTENT_TYPE),
-            response.headers().get(reqwest::header::CONTENT_ENCODING)
-        );
-        let failure = match response.bytes().await {
-            Ok(bytes) => match decode_works_response(&bytes) {
-                Ok(body) => return Ok(body),
-                Err(mut failure) => {
-                    failure.message = format!(
-                        "{context}: {}; {metadata}; {} bytes received",
-                        failure.message,
-                        bytes.len()
-                    );
-                    failure
-                }
-            },
-            Err(error) => DecodeFailure {
-                message: format!(
-                    "{context}: response body read failed; {metadata}; {}",
-                    error_details(&error.without_url())
-                ),
-                retryable: true,
-            },
+        let (failure, first_retry_delay) = match fetch_works_page_once(client, url.clone(), &context).await {
+            Ok(body) => return Ok(body),
+            Err(failure) => failure,
         };
         if !failure.retryable {
             return Err(failure.message);
@@ -127,16 +106,74 @@ pub async fn works_page(
         if retry == MAX_RETRIES {
             return Err(format!("{}; exhausted {} attempts", failure.message, retry + 1));
         }
-        let delay = Duration::from_secs(2 * 2_u64.pow(retry));
+        let delay = crate::transient_http::retry_delay(first_retry_delay, retry);
         eprintln!(
-            "{}; retrying the same page in {}s (retry {}/{MAX_RETRIES})",
+            "{}; retrying the same page in {:.1}s (retry {}/{MAX_RETRIES})",
             failure.message,
-            delay.as_secs(),
+            delay.as_secs_f64(),
             retry + 1
         );
         tokio::time::sleep(delay).await;
     }
     unreachable!("each page either succeeds or returns its final failure")
+}
+
+/// One attempt at a works page. On failure, also returns how long to wait before the first retry.
+async fn fetch_works_page_once(
+    client: &reqwest::Client,
+    url: url::Url,
+    context: &str,
+) -> Result<WorksResponse, (PageFailure, Duration)> {
+    let server_error = |error: reqwest::Error, retryable: bool| {
+        (
+            PageFailure {
+                message: format!("{context}: {}", request_error(error.without_url())),
+                retryable,
+            },
+            crate::transient_http::FIRST_RETRY_DELAY,
+        )
+    };
+    let response = request(client, url)
+        .map_err(|message| {
+            (PageFailure { message, retryable: false }, crate::transient_http::FIRST_RETRY_DELAY)
+        })?
+        .send()
+        .await
+        .map_err(|error| {
+            let retryable = crate::transient_http::is_temporary_send_failure(&error);
+            server_error(error, retryable)
+        })?;
+    let status = response.status();
+    let response = response
+        .error_for_status()
+        .map_err(|error| server_error(error, crate::transient_http::is_temporary_server_status(status)))?;
+    let metadata = format!(
+        "HTTP {}, content-type {:?}, content-encoding {:?}",
+        response.status(),
+        response.headers().get(reqwest::header::CONTENT_TYPE),
+        response.headers().get(reqwest::header::CONTENT_ENCODING)
+    );
+    let failure = match response.bytes().await {
+        Ok(bytes) => match decode_works_response(&bytes) {
+            Ok(body) => return Ok(body),
+            Err(mut failure) => {
+                failure.message = format!(
+                    "{context}: {}; {metadata}; {} bytes received",
+                    failure.message,
+                    bytes.len()
+                );
+                failure
+            }
+        },
+        Err(error) => PageFailure {
+            message: format!(
+                "{context}: response body read failed; {metadata}; {}",
+                error_details(&error.without_url())
+            ),
+            retryable: true,
+        },
+    };
+    Err((failure, INCOMPLETE_BODY_FIRST_RETRY_DELAY))
 }
 
 #[cfg(test)]

@@ -11,6 +11,7 @@ mod protein_design;
 mod provenance;
 mod reader;
 mod snapshot_store;
+mod transient_http;
 mod data_export;
 mod works;
 
@@ -3486,7 +3487,7 @@ optional = true
     }
 
     #[tokio::test]
-    async fn openalex_schema_html_and_http_errors_fail_without_retrying_or_dumping_bodies() {
+    async fn openalex_schema_html_and_permanent_http_errors_fail_without_retrying_or_dumping_bodies() {
         for (status, content_type, body, expected) in [
             ("200 OK", "application/json",
                 r#"{"results":[{"id":"W1","authorships":[{"author":{"display_name":42}}]}],"meta":{"next_cursor":null}}"#,
@@ -3496,7 +3497,7 @@ optional = true
                 r#"{"results":[],"meta":{"next_cursor":null}} trailing"#, "after the response"),
             ("429 Too Many Requests", "application/json", r#"{"error":"PRIVATE_BODY_MARKER"}"#, "rate or usage budget"),
             ("401 Unauthorized", "application/json", r#"{"error":"PRIVATE_BODY_MARKER"}"#, "authorization failed"),
-            ("503 Service Unavailable", "text/html", "PRIVATE_BODY_MARKER", "503"),
+            ("500 Internal Server Error", "text/html", "PRIVATE_BODY_MARKER", "500"),
         ] {
             let (api_base, server) = spawn_http_server(vec![http_response(status, content_type, body)]);
             let error = fetch_works_for_filter_from(&CLIENT, &api_base, "author.id:A1".into(), 10)
@@ -3507,6 +3508,48 @@ optional = true
             assert!(!error.contains("PRIVATE_BODY_MARKER"));
             assert_eq!(server.join().unwrap().len(), 1);
         }
+    }
+
+    #[tokio::test]
+    async fn openalex_retries_temporary_server_errors_on_the_same_page() {
+        // Nov 2026: one 504 from OpenAlex used to abort the whole NAS publishing run.
+        let (api_base, server) = spawn_http_server(vec![
+            http_response("504 Gateway Timeout", "text/html", "PRIVATE_BODY_MARKER"),
+            http_response("502 Bad Gateway", "text/html", "PRIVATE_BODY_MARKER"),
+            http_response("200 OK", "application/json",
+                r#"{"results":[{"id":"W1"}],"meta":{"next_cursor":null}}"#),
+        ]);
+        let works = fetch_works_for_filter_from(&CLIENT, &api_base, "author.id:A1".into(), 10)
+            .await
+            .unwrap();
+        assert_eq!(ids(&works), vec![Some("W1".into())]);
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests.iter().all(|request| request == &requests[0]));
+    }
+
+    #[tokio::test]
+    async fn openalex_server_errors_that_persist_exhaust_retries_without_dumping_bodies() {
+        let response = http_response("503 Service Unavailable", "text/html", "PRIVATE_BODY_MARKER");
+        let (api_base, server) = spawn_http_server(vec![response; 3]);
+        let error = fetch_works_for_filter_from(&CLIENT, &api_base, "author.id:A1".into(), 10)
+            .await
+            .unwrap_err();
+        assert!(error.contains("503"), "{error}");
+        assert!(error.contains("exhausted 3 attempts"), "{error}");
+        assert!(error.contains("page 1 (0 records received)"));
+        assert!(!error.contains("PRIVATE_BODY_MARKER"));
+        assert_eq!(server.join().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn openalex_refused_connections_are_retried_then_reported() {
+        // Bind and immediately release a port so nothing is listening on it.
+        let unused_port = StdTcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let error = fetch_works_for_filter_from(
+            &CLIENT, &format!("http://127.0.0.1:{unused_port}"), "author.id:A1".into(), 10,
+        ).await.unwrap_err();
+        assert!(error.contains("exhausted 3 attempts"), "{error}");
     }
 
     #[tokio::test]

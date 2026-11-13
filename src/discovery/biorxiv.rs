@@ -13,6 +13,9 @@ const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 const OVERLAP_DAYS: u32 = 2;
 const PAGE_SIZE: usize = 30;
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+/// Overrides the shared client's 30 s timeout. On 2026-11-13 a single bioRxiv page took
+/// 28-32 s to answer, so the default timeout failed about half of the requests.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 pub const CATEGORIES: &[(&str, &str)] = &[
     ("biochemistry", "Biochemistry"),
     ("bioengineering", "Bioengineering"),
@@ -193,34 +196,93 @@ async fn fetch_page(
     through: &str,
     cursor: usize,
 ) -> Result<ApiResponse, String> {
-    let url = format!("{API_BASE}/{from}/{through}/{cursor}/json");
+    fetch_page_from(client, API_BASE, category, from, through, cursor).await
+}
+
+/// Timeouts, refused connections and 502/503/504 are retried on the same page; anything else
+/// (other HTTP errors, oversized or malformed responses) fails at once.
+async fn fetch_page_from(
+    client: &reqwest::Client,
+    api_base: &str,
+    category: &str,
+    from: &str,
+    through: &str,
+    cursor: usize,
+) -> Result<ApiResponse, String> {
+    use crate::transient_http::{retry_delay, FIRST_RETRY_DELAY, MAX_RETRIES};
+    for retry in 0..=MAX_RETRIES {
+        let failure = match fetch_page_once(client, api_base, category, from, through, cursor).await {
+            Ok(response) => return Ok(response),
+            Err(failure) => failure,
+        };
+        if !failure.retryable {
+            return Err(failure.message);
+        }
+        if retry == MAX_RETRIES {
+            return Err(format!("{}; exhausted {} attempts", failure.message, retry + 1));
+        }
+        let delay = retry_delay(FIRST_RETRY_DELAY, retry);
+        eprintln!(
+            "{}; retrying the same page in {:.1}s (retry {}/{MAX_RETRIES})",
+            failure.message,
+            delay.as_secs_f64(),
+            retry + 1
+        );
+        tokio::time::sleep(delay).await;
+    }
+    unreachable!("each page either succeeds or returns its final failure")
+}
+
+struct PageFailure {
+    message: String,
+    retryable: bool,
+}
+
+async fn fetch_page_once(
+    client: &reqwest::Client,
+    api_base: &str,
+    category: &str,
+    from: &str,
+    through: &str,
+    cursor: usize,
+) -> Result<ApiResponse, PageFailure> {
+    let permanent = |message: String| PageFailure { message, retryable: false };
+    let url = format!("{api_base}/{from}/{through}/{cursor}/json");
     let response = client
         .get(url)
         .query(&[("category", category)])
+        .timeout(REQUEST_TIMEOUT)
         .send()
         .await
-        .map_err(|error| format!("bioRxiv {category} request failed: {error}"))?
-        .error_for_status()
-        .map_err(|error| format!("bioRxiv {category} request failed: {error}"))?;
+        .map_err(|error| PageFailure {
+            retryable: crate::transient_http::is_temporary_send_failure(&error),
+            message: format!("bioRxiv {category} request failed: {error}"),
+        })?;
+    let status = response.status();
+    let response = response.error_for_status().map_err(|error| PageFailure {
+        retryable: crate::transient_http::is_temporary_server_status(status),
+        message: format!("bioRxiv {category} request failed: {error}"),
+    })?;
     if response
         .content_length()
         .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
     {
-        return Err(format!(
+        return Err(permanent(format!(
             "bioRxiv {category} response exceeded the {MAX_RESPONSE_BYTES}-byte limit"
-        ));
+        )));
     }
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|error| format!("Failed reading bioRxiv {category} response: {error}"))?;
+    let bytes = response.bytes().await.map_err(|error| PageFailure {
+        // The body stopped arriving partway; the same timeout/connection rules apply.
+        retryable: crate::transient_http::is_temporary_send_failure(&error),
+        message: format!("Failed reading bioRxiv {category} response: {error}"),
+    })?;
     if bytes.len() > MAX_RESPONSE_BYTES {
-        return Err(format!(
+        return Err(permanent(format!(
             "bioRxiv {category} response exceeded the {MAX_RESPONSE_BYTES}-byte limit"
-        ));
+        )));
     }
     serde_json::from_slice(&bytes)
-        .map_err(|error| format!("Failed parsing bioRxiv {category} response: {error}"))
+        .map_err(|error| permanent(format!("Failed parsing bioRxiv {category} response: {error}")))
 }
 
 fn convert_work(configured_category: &str, work: ApiWork) -> Result<Work, String> {
