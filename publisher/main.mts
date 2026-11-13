@@ -139,6 +139,21 @@ async function discardStrandedSnapshotCommits(git: (args: string[]) => Promise<s
   log(`Discarded ${strandedRevisions.length} unpushed data snapshot commit(s) from an earlier failed push (${strandedRevisions.join(", ")}); this run exports a fresh snapshot instead.`);
 }
 
+type StaleFeed = { id: string; collected_at: string };
+
+/** Feeds the collector republished from the previous snapshot because their refresh failed:
+ * their collected_at predates this run's collection. */
+async function findStaleFeeds(snapshotPath: string, collectionStartedAt: Date): Promise<StaleFeed[]> {
+  const snapshot: unknown = JSON.parse(await readFile(snapshotPath, "utf8"));
+  const feeds = snapshot && typeof snapshot === "object" && "feeds" in snapshot && Array.isArray(snapshot.feeds) ? snapshot.feeds : [];
+  // collected_at has whole-second precision, so compare against the start of that second.
+  const startedAtSecond = Math.floor(collectionStartedAt.getTime() / 1000) * 1000;
+  return feeds
+    .filter((feed): feed is StaleFeed => typeof feed?.id === "string" && typeof feed?.collected_at === "string")
+    .filter((feed) => Date.parse(feed.collected_at) < startedAtSecond)
+    .map(({ id, collected_at }) => ({ id, collected_at }));
+}
+
 async function summary(state: string, value: Record<string, unknown>): Promise<void> {
   const temporary = path.join(state, "last-run.json.tmp");
   await writeFile(temporary, JSON.stringify({ ...value, at: new Date().toISOString() }, null, 2), { mode: 0o600 });
@@ -214,6 +229,7 @@ export async function publish(config: Config, dependencies: Dependencies = {}): 
     attempt = await mkdtemp(path.join(work, "run-"));
     const candidate = path.join(attempt, "data");
     log("Collecting a JSON snapshot; HTML and RSS are built by GitHub Actions.");
+    const collectionStartedAt = new Date();
     const args = ["--export", candidate];
     if (previous) args.push("--previous", destination);
     const output = await run("scholarly-rss-feed", args, {
@@ -221,6 +237,12 @@ export async function publish(config: Config, dependencies: Dependencies = {}): 
       env: { ...cleanEnv, GSRF_CONFIG: "/config/feeds.toml", GSRF_CACHE_DIR: cache, GSRF_PROVIDER: "openalex", GSRF_MAILTO: config.mailto, GSRF_OPENALEX_API_KEY: config.openalexKey },
     });
     if (output) log(output);
+    const staleFeeds = await findStaleFeeds(path.join(candidate, "snapshot.json"), collectionStartedAt);
+    // Only listed when present, so a fully refreshed run's summary is unchanged.
+    const staleSummary = staleFeeds.length ? { stale_feeds: staleFeeds } : {};
+    for (const feed of staleFeeds) {
+      log(`WARNING: feed ${feed.id} failed to refresh and was republished as collected at ${feed.collected_at}; see the STALE FEED lines above.`);
+    }
     await run("npm", ["ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"], { cwd: checkout, env: cleanEnv });
     await run("node", ["scripts/validate-data.ts", candidate], {
       cwd: checkout, env: { ...cleanEnv, PREVIOUS_DATA: previous ? destination : "", ALLOW_FEED_SHRINK: String(config.allowShrink) },
@@ -233,7 +255,7 @@ export async function publish(config: Config, dependencies: Dependencies = {}): 
           await removeRun(old.attempt, work);
         }
       }
-      await summary(config.state, { status: "prepared", attempt, output: candidate });
+      await summary(config.state, { status: "prepared", attempt, output: candidate, ...staleSummary });
       log(`Prepared and validated ${candidate}. Nothing was committed, pushed, or deployed. Set PUBLISH_MODE=publish when ready.`);
       return;
     }
@@ -258,7 +280,7 @@ export async function publish(config: Config, dependencies: Dependencies = {}): 
     if (!diff) {
       const revision = await git(["rev-parse", "HEAD"]);
       await wait(request, config.repository, revision);
-      await summary(config.state, { status: "unchanged", revision });
+      await summary(config.state, { status: "unchanged", revision, ...staleSummary });
       log("No public snapshot changes; the existing revision's deployment was confirmed.");
     } else {
       if (diff.split("\n").some((file) => !file.startsWith("data/"))) throw new Error("Refusing to commit changes outside data/");
@@ -267,7 +289,7 @@ export async function publish(config: Config, dependencies: Dependencies = {}): 
       await git(["push", "origin", "HEAD:main"]);
       log(`Pushed ${revision}; waiting for the matching Pages deploy job.`);
       await wait(request, config.repository, revision);
-      await summary(config.state, { status: "deployed", revision });
+      await summary(config.state, { status: "deployed", revision, ...staleSummary });
       log(`Snapshot ${revision} deployed successfully.`);
     }
     await removeRun(attempt, work);

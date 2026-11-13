@@ -166,7 +166,13 @@ MAX_SNAPSHOT_AGE_HOURS=48
 ```
 
 Verify GitHub Actions failure notifications. The monitor checks **data_generated_at**, not
-the website's **built_at**, so UI-only rebuilds cannot conceal stale NAS data.
+the website's **built_at**, so UI-only rebuilds cannot conceal stale NAS data. It also checks
+each feed's own collection time, so a feed that keeps failing to refresh while the others
+publish (the bounded stale-feed fallback) is reported once it is older than the limit.
+
+A run where one feed fell back still succeeds; `state/last-run.json` then lists it under
+`stale_feeds` with the time its data was collected, and the task output has a
+`STALE FEED <id>` line with the refresh error.
 
 ## 7. Move the subdomain after preview acceptance
 
