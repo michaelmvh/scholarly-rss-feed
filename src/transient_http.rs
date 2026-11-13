@@ -28,7 +28,23 @@ pub fn is_temporary_server_status(status: reqwest::StatusCode) -> bool {
     )
 }
 
-/// No response at all: the connection failed or the server took longer than the timeout.
+/// No usable response: the connection failed, dropped mid-request (for example a reused
+/// keep-alive connection the server had already closed), or outlasted the timeout.
+/// On 2026-11-13 the NAS hit a dropped bioRxiv request that was neither a timeout nor a
+/// connect error, so every send-phase failure counts.
 pub fn is_temporary_send_failure(error: &reqwest::Error) -> bool {
-    error.is_timeout() || error.is_connect()
+    error.is_timeout() || error.is_connect() || error.is_request()
+}
+
+/// The error plus every underlying cause. reqwest's own message stops at
+/// "error sending request", which hides why the request actually failed.
+pub fn error_with_causes(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut details = error.to_string();
+    let mut cause = error.source();
+    while let Some(error) = cause {
+        details.push_str(": ");
+        details.push_str(&error.to_string());
+        cause = error.source();
+    }
+    details
 }

@@ -256,12 +256,18 @@ async fn fetch_page_once(
         .await
         .map_err(|error| PageFailure {
             retryable: crate::transient_http::is_temporary_send_failure(&error),
-            message: format!("bioRxiv {category} request failed: {error}"),
+            message: format!(
+            "bioRxiv {category} request failed: {}",
+            crate::transient_http::error_with_causes(&error)
+        ),
         })?;
     let status = response.status();
     let response = response.error_for_status().map_err(|error| PageFailure {
         retryable: crate::transient_http::is_temporary_server_status(status),
-        message: format!("bioRxiv {category} request failed: {error}"),
+        message: format!(
+            "bioRxiv {category} request failed: {}",
+            crate::transient_http::error_with_causes(&error)
+        ),
     })?;
     if response
         .content_length()
@@ -273,8 +279,11 @@ async fn fetch_page_once(
     }
     let bytes = response.bytes().await.map_err(|error| PageFailure {
         // The body stopped arriving partway; the same timeout/connection rules apply.
-        retryable: crate::transient_http::is_temporary_send_failure(&error),
-        message: format!("Failed reading bioRxiv {category} response: {error}"),
+        retryable: crate::transient_http::is_temporary_send_failure(&error) || error.is_body(),
+        message: format!(
+            "Failed reading bioRxiv {category} response: {}",
+            crate::transient_http::error_with_causes(&error)
+        ),
     })?;
     if bytes.len() > MAX_RESPONSE_BYTES {
         return Err(permanent(format!(

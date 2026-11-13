@@ -40,7 +40,10 @@ pub fn request_error(error: reqwest::Error) -> String {
             "OpenAlex authorization failed. Configure a verified GSRF_OPENALEX_API_KEY; cursor paging beyond the first page requires a key.".to_string(),
         Some(reqwest::StatusCode::TOO_MANY_REQUESTS) =>
             "OpenAlex rate or usage budget limit reached. Check the API key's usage before retrying.".to_string(),
-        _ => format!("OpenAlex request failed: {error}"),
+        _ => format!(
+            "OpenAlex request failed: {}",
+            crate::transient_http::error_with_causes(&error)
+        ),
     }
 }
 
@@ -68,17 +71,6 @@ fn decode_works_response(bytes: &[u8]) -> Result<WorksResponse, PageFailure> {
         retryable: error.is_eof(),
     })?;
     Ok(response)
-}
-
-fn error_details(error: &(dyn std::error::Error + 'static)) -> String {
-    let mut details = error.to_string();
-    let mut cause = error.source();
-    while let Some(error) = cause {
-        details.push_str(": ");
-        details.push_str(&error.to_string());
-        cause = error.source();
-    }
-    details
 }
 
 /// A page whose body arrived cut off is usually fine on an immediate second request.
@@ -168,7 +160,7 @@ async fn fetch_works_page_once(
         Err(error) => PageFailure {
             message: format!(
                 "{context}: response body read failed; {metadata}; {}",
-                error_details(&error.without_url())
+                crate::transient_http::error_with_causes(&error.without_url())
             ),
             retryable: true,
         },
