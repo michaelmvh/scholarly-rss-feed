@@ -38,6 +38,7 @@ async function setup() {
   let wrongOrigin = false;
   let deploymentChecks = 0;
   let updateUiDuringCollection = false;
+  let snapshotFeeds: { id: string; collected_at: string }[] | undefined;
   const run: Run = async (command, args, options) => {
     calls.push({ command, args, env: options.env });
     if (command === "git") {
@@ -54,7 +55,9 @@ async function setup() {
       if (fail === "export") throw new Error("export failed");
       const candidate = args[args.indexOf("--export") + 1];
       await mkdir(candidate, { recursive: true });
-      await writeFile(path.join(candidate, "snapshot.json"), '{"schema_version":1,"article_files":[]}');
+      const collectedNow = new Date().toISOString();
+      const feeds = snapshotFeeds?.map((feed) => ({ ...feed, collected_at: feed.collected_at || collectedNow }));
+      await writeFile(path.join(candidate, "snapshot.json"), JSON.stringify({ schema_version: 1, article_files: [], ...(feeds ? { feeds } : {}) }));
       if (updateUiDuringCollection) {
         await writeFile(path.join(seed, "reader-ui.txt"), "independent UI update");
         git(seed, ["add", "reader-ui.txt"]); git(seed, ["commit", "-m", "Update reader UI"]); git(seed, ["push"]);
@@ -76,6 +79,8 @@ async function setup() {
     fail: (value: typeof fail) => { fail = value; },
     wrongOrigin: () => { wrongOrigin = true; },
     updateUi: () => { updateUiDuringCollection = true; },
+    /** Feeds the fake collector writes; an empty collected_at means "collected during this run". */
+    setSnapshotFeeds: (feeds: typeof snapshotFeeds) => { snapshotFeeds = feeds; },
     deploymentChecks: () => deploymentChecks,
     run: () => publish(config, {
       run, request: async () => ({}), log: (message) => log.push(message),
@@ -276,4 +281,33 @@ test("deployment polling distinguishes success, skipped deployment, failure, and
     timeoutMs: 2, intervalMs: 1, now: () => time, sleep: async (ms) => { time += ms; },
   }), /Timed out/);
   await assert.rejects(waitForDeployment(async () => ({ workflow_runs: [{ id: 1, head_sha: "revision", status: "completed", conclusion: "failure" }] }), "fixture/site", "revision"), /did not succeed/);
+});
+
+test("feeds republished from an older snapshot are listed in last-run.json and logged", async () => {
+  const f = await setup();
+  try {
+    f.config.mode = "publish";
+    f.setSnapshotFeeds([
+      { id: "fresh", collected_at: "" },
+      { id: "stale", collected_at: "2026-11-05T02:03:00Z" },
+    ]);
+    await f.run();
+    const summary = JSON.parse(await readFile(path.join(f.config.state, "last-run.json"), "utf8"));
+    assert.equal(summary.status, "deployed");
+    assert.deepEqual(summary.stale_feeds, [{ id: "stale", collected_at: "2026-11-05T02:03:00Z" }]);
+    assert.ok(f.log.some((message) => message.includes("WARNING: feed stale failed to refresh")));
+    assert.ok(!f.log.some((message) => message.includes("feed fresh failed")));
+  } finally { await rm(f.root, { recursive: true }); }
+});
+
+test("a fully refreshed run's summary has no stale_feeds entry", async () => {
+  const f = await setup();
+  try {
+    f.config.mode = "publish";
+    f.setSnapshotFeeds([{ id: "fresh", collected_at: "" }]);
+    await f.run();
+    const summary = JSON.parse(await readFile(path.join(f.config.state, "last-run.json"), "utf8"));
+    assert.equal(summary.status, "deployed");
+    assert.ok(!("stale_feeds" in summary));
+  } finally { await rm(f.root, { recursive: true }); }
 });

@@ -12,6 +12,15 @@ use std::path::{Path, PathBuf};
 const SCHEMA_VERSION: u32 = 1;
 const MAX_FILE_BYTES: usize = 50 * 1024 * 1024;
 const MAX_SNAPSHOT_BYTES: usize = 500 * 1024 * 1024;
+/// `freshness_policy` when every feed refreshed in this run.
+const ALL_FEEDS_REFRESHED: &str = "required_discovery_refresh";
+/// `freshness_policy` when at least one feed was republished from the previous snapshot.
+const STALE_FEED_FALLBACK: &str = "bounded_stale_feed_fallback";
+/// A feed whose refresh fails may be republished from the previous snapshot only while it
+/// lagged that snapshot by less than this. The lag is measured against the previous
+/// snapshot's generation time, not the clock, so a site-wide outage (no runs publishing at
+/// all) doesn't count against one feed; only time spent failing while others published does.
+const MAX_STALE_FEED_LAG_HOURS: i64 = 48;
 
 pub(crate) struct ExportArgs {
     output: PathBuf,
@@ -264,12 +273,26 @@ fn validate_aliases(archive: &BTreeMap<String, Article>) -> Result<(), String> {
     Ok(())
 }
 
+/// What the previous snapshot provides: every retained article, plus each feed as published
+/// and the snapshot's generation time (used to republish a feed whose refresh failed).
+#[derive(Default)]
+struct PreviousSnapshot {
+    archive: BTreeMap<String, Article>,
+    generated_at: Option<String>,
+    feeds: BTreeMap<String, Feed>,
+}
+
+#[cfg(test)]
 fn load_archive(previous: Option<&Path>) -> Result<BTreeMap<String, Article>, String> {
+    load_previous(previous).map(|previous| previous.archive)
+}
+
+fn load_previous(previous: Option<&Path>) -> Result<PreviousSnapshot, String> {
     let Some(previous) = previous else {
-        return Ok(BTreeMap::new());
+        return Ok(PreviousSnapshot::default());
     };
     let manifest = read(&previous.join("snapshot.json"))?;
-    let snapshot: Snapshot = serde_json::from_slice(&manifest)
+    let mut snapshot: Snapshot = serde_json::from_slice(&manifest)
         .map_err(|error| format!("Invalid previous snapshot: {error}"))?;
     if snapshot.schema_version != SCHEMA_VERSION {
         return Err("Unsupported previous data schema.".to_string());
@@ -283,7 +306,7 @@ fn load_archive(previous: Option<&Path>) -> Result<BTreeMap<String, Article>, St
     if !shard_dir.is_dir() {
         return Err("Article shards must use a real directory.".to_string());
     }
-    for entry in snapshot.article_files {
+    for entry in std::mem::take(&mut snapshot.article_files) {
         let bucket = entry
             .path
             .strip_prefix("articles/")
@@ -326,7 +349,16 @@ fn load_archive(previous: Option<&Path>) -> Result<BTreeMap<String, Article>, St
         }
     }
     validate_aliases(&archive)?;
-    Ok(archive)
+    let feeds = snapshot
+        .feeds
+        .into_iter()
+        .map(|feed| (feed.id.clone(), feed))
+        .collect();
+    Ok(PreviousSnapshot {
+        archive,
+        generated_at: Some(snapshot.generated_at),
+        feeds,
+    })
 }
 
 fn identify(
@@ -457,23 +489,33 @@ pub(crate) async fn run(args: &ExportArgs, config_path: &Path) -> Result<(), Str
         );
     }
     let mut inputs = BTreeMap::new();
+    let mut failed_feeds = BTreeMap::new();
     for name in config.feeds.keys().collect::<BTreeSet<_>>() {
-        let request = crate::resolve_feed_request(
+        let request = match crate::resolve_feed_request(
             &[("feed".to_string(), name.clone())],
             &config,
             Provider::configured()?,
         )
         .await
-        .map_err(|error| match error {
-            ResolveFeedError::InvalidRequest(message) | ResolveFeedError::Provider(message) => {
-                message
+        {
+            Ok(Some(request)) => request,
+            Ok(None) => return Err(format!("Feed {name} did not resolve.")),
+            // A bad feeds.toml entry won't fix itself; stop instead of publishing old data.
+            Err(ResolveFeedError::InvalidRequest(message)) => return Err(message),
+            // Provider lookups (e.g. ORCID or journal resolution) can fail transiently.
+            Err(ResolveFeedError::Provider(message)) => {
+                failed_feeds.insert(name.clone(), format!("Feed {name:?} lookup failed: {message}"));
+                continue;
             }
-        })?
-        .ok_or_else(|| format!("Feed {name} did not resolve."))?;
+        };
         println!("Collecting JSON data for {name}");
-        let works = crate::fetch_works(&request, RefreshPolicy::RequireFresh)
-            .await
-            .map_err(|error| format!("Feed {name:?} discovery failed: {error}"))?;
+        let works = match crate::fetch_works(&request, RefreshPolicy::RequireFresh).await {
+            Ok(works) => works,
+            Err(error) => {
+                failed_feeds.insert(name.clone(), format!("Feed {name:?} discovery failed: {error}"));
+                continue;
+            }
+        };
         let keys = works
             .iter()
             .map(|work| {
@@ -496,21 +538,68 @@ pub(crate) async fn run(args: &ExportArgs, config_path: &Path) -> Result<(), Str
             },
         );
     }
-    export(args, default, inputs)
+    export_with_failed_feeds(args, default, inputs, failed_feeds)
 }
 
-fn export(
+#[cfg(test)]
+fn export(args: &ExportArgs, default: &str, inputs: BTreeMap<String, Input>) -> Result<(), String> {
+    export_with_failed_feeds(args, default, inputs, BTreeMap::new())
+}
+
+/// Decide whether a feed whose refresh failed can be republished as it was in the previous
+/// snapshot. Returns that feed, or the error that should stop the whole run.
+fn stale_feed_fallback(
+    name: &str,
+    refresh_error: &str,
+    previous: &mut PreviousSnapshot,
+) -> Result<Feed, String> {
+    let Some(feed) = previous.feeds.remove(name) else {
+        return Err(format!(
+            "{refresh_error}\nNo previous published data exists for feed {name:?}, so it cannot be republished."
+        ));
+    };
+    let parse = |value: &str| {
+        chrono::DateTime::parse_from_rfc3339(value)
+            .map_err(|error| format!("Previous snapshot has an invalid timestamp {value:?}: {error}"))
+    };
+    let previous_generated_at = parse(previous.generated_at.as_deref().expect("loaded with feeds"))?;
+    let lag = previous_generated_at - parse(&feed.collected_at)?;
+    if lag >= chrono::Duration::hours(MAX_STALE_FEED_LAG_HOURS) {
+        return Err(format!(
+            "{refresh_error}\nFeed {name:?} was last refreshed at {}, already {} hours behind the previous snapshot; \
+             the {MAX_STALE_FEED_LAG_HOURS}-hour stale-feed limit stops publication instead of republishing it again.",
+            feed.collected_at,
+            lag.num_hours()
+        ));
+    }
+    eprintln!(
+        "STALE FEED {name}: {refresh_error}\nRepublishing {name} as collected at {} ({} hours behind the previous snapshot).",
+        feed.collected_at,
+        lag.num_hours()
+    );
+    Ok(feed)
+}
+
+/// Export every feed. A feed listed in `failed_feeds` (name -> refresh error) is republished
+/// from the previous snapshot when `stale_feed_fallback` allows it; otherwise the run fails.
+fn export_with_failed_feeds(
     args: &ExportArgs,
     default: &str,
     mut inputs: BTreeMap<String, Input>,
+    failed_feeds: BTreeMap<String, String>,
 ) -> Result<(), String> {
     if args.output.exists()
-        || !inputs.contains_key(default)
-        || inputs.keys().any(|name| !valid_name(name))
+        || !(inputs.contains_key(default) || failed_feeds.contains_key(default))
+        || inputs.keys().chain(failed_feeds.keys()).any(|name| !valid_name(name))
     {
         return Err("Data destination must be fresh and feed/default names valid.".to_string());
     }
-    let mut archive = load_archive(args.previous.as_deref())?;
+    let mut previous = load_previous(args.previous.as_deref())?;
+    let mut stale_feeds = Vec::new();
+    for (name, refresh_error) in &failed_feeds {
+        stale_feeds.push(stale_feed_fallback(name, refresh_error, &mut previous)?);
+    }
+    let mut archive = std::mem::take(&mut previous.archive);
     let mut index = archive
         .values()
         .flat_map(|article| {
@@ -523,7 +612,10 @@ fn export(
     let mut current = BTreeMap::new();
     let mut feeds = Vec::new();
     // Prefer the default feed's canonical metadata, not whichever feed sorts last.
-    let mut order = vec![default.to_string()];
+    let mut order = Vec::new();
+    if inputs.contains_key(default) {
+        order.push(default.to_string());
+    }
     order.extend(
         inputs
             .keys()
@@ -592,6 +684,14 @@ fn export(
             sources,
         });
     }
+    let freshness_policy = if stale_feeds.is_empty() {
+        ALL_FEEDS_REFRESHED
+    } else {
+        STALE_FEED_FALLBACK
+    };
+    // Stale feeds keep their old article ids; the pass below maps any that this run
+    // reconciled into another article onto that canonical article.
+    feeds.extend(stale_feeds);
     validate_aliases(&archive)?;
     for feed in &mut feeds {
         let mut matches: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -639,7 +739,7 @@ fn export(
             schema_version: SCHEMA_VERSION,
             generated_at: now(),
             generator_version: env!("CARGO_PKG_VERSION").to_string(),
-            freshness_policy: "required_discovery_refresh".to_string(),
+            freshness_policy: freshness_policy.to_string(),
             default_feed: default.to_string(),
             feeds,
             article_files,
@@ -1030,6 +1130,131 @@ mod tests {
         }
         fs::remove_dir_all(first).unwrap();
         fs::remove_dir_all(next).unwrap();
+    }
+
+    fn read_snapshot(directory: &Path) -> Snapshot {
+        serde_json::from_slice(&fs::read(directory.join("snapshot.json")).unwrap()).unwrap()
+    }
+
+    /// Two feeds, "main" (default) and "side", published once as the previous snapshot.
+    fn previous_two_feed_snapshot() -> PathBuf {
+        let previous = directory();
+        export(
+            &ExportArgs::new(previous.clone(), None),
+            "main",
+            BTreeMap::from([
+                ("main".to_string(), sample("main-one", false)),
+                ("side".to_string(), sample("side-one", false)),
+            ]),
+        )
+        .unwrap();
+        previous
+    }
+
+    /// Make one feed of a previous snapshot look like it last refreshed `hours` before the
+    /// snapshot was generated (the manifest isn't checksummed, only article shards are).
+    fn backdate_feed(previous: &Path, feed_id: &str, hours: i64) {
+        let mut snapshot = read_snapshot(previous);
+        let generated_at = chrono::DateTime::parse_from_rfc3339(&snapshot.generated_at).unwrap();
+        let feed = snapshot.feeds.iter_mut().find(|feed| feed.id == feed_id).unwrap();
+        feed.collected_at = (generated_at - chrono::Duration::hours(hours))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        fs::write(previous.join("snapshot.json"), json(&snapshot).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_failed_feed_is_republished_from_the_previous_snapshot_while_others_refresh() {
+        let previous = previous_two_feed_snapshot();
+        backdate_feed(&previous, "side", 6);
+        let before = read_snapshot(&previous);
+        let side_before = before.feeds.iter().find(|feed| feed.id == "side").unwrap();
+        let output = directory();
+        export_with_failed_feeds(
+            &ExportArgs::new(output.clone(), Some(previous.clone())),
+            "main",
+            BTreeMap::from([("main".to_string(), sample("main-two", false))]),
+            BTreeMap::from([("side".to_string(), "bioRxiv request failed".to_string())]),
+        )
+        .unwrap();
+        let after = read_snapshot(&output);
+        assert_eq!(after.freshness_policy, STALE_FEED_FALLBACK);
+        let side_after = after.feeds.iter().find(|feed| feed.id == "side").unwrap();
+        assert_eq!(side_after.collected_at, side_before.collected_at);
+        assert_eq!(side_after.article_ids, side_before.article_ids);
+        assert_eq!(side_after.matches, side_before.matches);
+        let main_after = after.feeds.iter().find(|feed| feed.id == "main").unwrap();
+        assert!(main_after.collected_at > side_after.collected_at);
+        assert_eq!(main_after.article_ids, vec![digest(b"https://example.org/main-two")]);
+        // Every id a stale feed lists must still be in the article shards.
+        let archive = load_archive(Some(&output)).unwrap();
+        assert!(side_after.article_ids.iter().all(|id| archive.contains_key(id)));
+        fs::remove_dir_all(previous).unwrap();
+        fs::remove_dir_all(output).unwrap();
+    }
+
+    #[test]
+    fn the_default_feed_can_also_fall_back() {
+        let previous = previous_two_feed_snapshot();
+        let output = directory();
+        export_with_failed_feeds(
+            &ExportArgs::new(output.clone(), Some(previous.clone())),
+            "main",
+            BTreeMap::from([("side".to_string(), sample("side-two", false))]),
+            BTreeMap::from([("main".to_string(), "OpenAlex 504".to_string())]),
+        )
+        .unwrap();
+        let after = read_snapshot(&output);
+        assert_eq!(after.default_feed, "main");
+        assert_eq!(after.feeds.len(), 2);
+        fs::remove_dir_all(previous).unwrap();
+        fs::remove_dir_all(output).unwrap();
+    }
+
+    #[test]
+    fn a_feed_already_lagging_past_the_limit_stops_the_run() {
+        let previous = previous_two_feed_snapshot();
+        backdate_feed(&previous, "side", MAX_STALE_FEED_LAG_HOURS);
+        let output = directory();
+        let error = export_with_failed_feeds(
+            &ExportArgs::new(output.clone(), Some(previous.clone())),
+            "main",
+            BTreeMap::from([("main".to_string(), sample("main-two", false))]),
+            BTreeMap::from([("side".to_string(), "bioRxiv request failed".to_string())]),
+        )
+        .unwrap_err();
+        assert!(error.contains("bioRxiv request failed"), "{error}");
+        assert!(error.contains("stale-feed limit"), "{error}");
+        assert!(!output.exists());
+        fs::remove_dir_all(previous).unwrap();
+    }
+
+    #[test]
+    fn a_failed_feed_without_previous_data_stops_the_run() {
+        let previous = previous_two_feed_snapshot();
+        for (previous, failed) in [(None, "main"), (Some(previous.clone()), "new-feed")] {
+            let output = directory();
+            let error = export_with_failed_feeds(
+                &ExportArgs::new(output.clone(), previous),
+                "main",
+                BTreeMap::from([("main".to_string(), sample("main-two", false))])
+                    .into_iter()
+                    .filter(|(name, _)| name != failed)
+                    .collect(),
+                BTreeMap::from([(failed.to_string(), "OpenAlex 504".to_string())]),
+            )
+            .unwrap_err();
+            assert!(error.contains("OpenAlex 504"), "{error}");
+            assert!(error.contains("No previous published data"), "{error}");
+            assert!(!output.exists());
+        }
+        fs::remove_dir_all(previous).unwrap();
+    }
+
+    #[test]
+    fn a_fully_refreshed_run_keeps_the_original_freshness_policy() {
+        let previous = previous_two_feed_snapshot();
+        assert_eq!(read_snapshot(&previous).freshness_policy, ALL_FEEDS_REFRESHED);
+        fs::remove_dir_all(previous).unwrap();
     }
 
     #[test]

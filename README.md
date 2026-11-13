@@ -105,9 +105,19 @@ The contract also supports explicit day/month/year precision when producers can 
 
 The entire previous JSON snapshot is public metadata, not a private provider cache. Keep
 it backed up. Empty required feeds, unsafe URLs, malformed/checksum-invalid previous data,
-and required source-refresh failures stop publication. Incremental caches and successful
+and feed configuration errors stop publication. Incremental caches and successful
 conditional requests remain supported. Optional enrichment may fail with an explicit log;
 the HTTP service retains its existing stale-cache fallback policy.
+
+When one feed's sources fail to refresh (after the HTTP retries), that feed is republished
+exactly as it was in the previous snapshot, keeping its older `collected_at`, while the
+other feeds update. The log shows a `STALE FEED <id>` line with the refresh error, the NAS
+`last-run.json` lists it under `stale_feeds`, and `snapshot.json` sets `freshness_policy`
+to `bounded_stale_feed_fallback` (it stays `required_discovery_refresh` when every feed
+refreshed). A feed may only fall back while it lagged the previous snapshot by less than
+48 hours; past that, or for a feed with no previous data, the run fails and the previous
+snapshot stays live. The lag is measured against the previous snapshot rather than the
+clock, so a site-wide outage doesn't count against a single feed.
 
 The public site URL belongs to the reader build. `--site-url` is no longer accepted here.
 Changing preview/production domains or reader styling does not require recollecting data.
@@ -201,8 +211,8 @@ reader collection menu exposes:
 
 Native preprint-category ingestion is not enabled for this feed. Papers indexed by
 OpenAlex can include preprints, and existing version deduplication and canonical article
-identities are reused. Field-search candidate limits and required-refresh failures stop
-publication rather than silently truncating results.
+identities are reused. Field-search candidate limits stop publication rather than silently
+truncating results; refresh failures follow the bounded stale-feed fallback described above.
 
 ### Protein nanopores and protein sequencing
 
@@ -225,8 +235,8 @@ are available at:
 with author/journal results. Each query is limited to 512 bytes and 2,000 candidate works
 (or the lower `GSRF_MAX_OPENALEX_WORKS` limit). Date and optional topic filters apply to
 each search. Search-only feeds are supported; `topics` alone still does not discover works.
-Paging, authentication, version deduplication, and required-refresh failure handling use the
-existing OpenAlex pipeline. Exceeding a limit fails publication instead of truncating it.
+Paging, authentication, version deduplication, and refresh-failure handling (bounded
+stale-feed fallback) use the existing OpenAlex pipeline. Exceeding a limit fails publication instead of truncating it.
 Searches also have a page-request budget, including a final page to confirm exhaustion.
 
 `relevance_filter = "protein_nanopore"` requires pore, protein/peptide analyte, and
