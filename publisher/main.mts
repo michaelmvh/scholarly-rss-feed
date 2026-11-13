@@ -116,6 +116,29 @@ export async function removeRun(run: string, work: string): Promise<void> {
   await rm(run, { recursive: true, force: true });
 }
 
+const snapshotCommitSubject = "Publish scholarly article data";
+
+// A snapshot commit whose push failed (for example a transient GitHub error) used to
+// block every later run until someone cleared it by hand. Such a commit holds only
+// collected data that this run's fresh export supersedes, so it is safe to drop.
+// Anything else unpushed is still left alone for a person to inspect.
+async function discardStrandedSnapshotCommits(git: (args: string[]) => Promise<string>, log: (message: string) => void): Promise<void> {
+  const strandedRevisions = (await git(["rev-list", "origin/main..HEAD"])).split("\n").filter(Boolean);
+  if (strandedRevisions.length === 0) return;
+  for (const revision of strandedRevisions) {
+    const subject = await git(["log", "-1", "--format=%s", revision]);
+    const parentCount = (await git(["rev-list", "--parents", "-n", "1", revision])).split(" ").length - 1;
+    const changedFiles = (await git(["diff-tree", "--no-commit-id", "--name-only", "-r", revision])).split("\n").filter(Boolean);
+    const isPublisherSnapshot = subject === snapshotCommitSubject && parentCount === 1
+      && changedFiles.every((file) => file.startsWith("data/"));
+    if (!isPublisherSnapshot) {
+      throw new Error(`Unpushed commit ${revision} is not a publisher data snapshot; inspect the checkout rather than discarding it`);
+    }
+  }
+  await git(["reset", "--hard", "origin/main"]);
+  log(`Discarded ${strandedRevisions.length} unpushed data snapshot commit(s) from an earlier failed push (${strandedRevisions.join(", ")}); this run exports a fresh snapshot instead.`);
+}
+
 async function summary(state: string, value: Record<string, unknown>): Promise<void> {
   const temporary = path.join(state, "last-run.json.tmp");
   await writeFile(temporary, JSON.stringify({ ...value, at: new Date().toISOString() }, null, 2), { mode: 0o600 });
@@ -176,6 +199,8 @@ export async function publish(config: Config, dependencies: Dependencies = {}): 
     if (await git(["branch", "--show-current"]) !== "main") throw new Error("Publishing checkout must be on main");
     if (await git(["status", "--porcelain"])) throw new Error("Publishing checkout is dirty; inspect it rather than discarding changes");
     await git(["fetch", "origin", "main"]);
+    // Runs before the fast-forward, which would fail if main moved past a stranded commit.
+    await discardStrandedSnapshotCommits(git, log);
     await git(["merge", "--ff-only", "origin/main"]);
     if (await git(["rev-list", "--count", "origin/main..HEAD"]) !== "0") throw new Error("Unpushed commits remain; recover the previous push before starting another export");
     if (!(await exists(path.join(checkout, "scripts/validate-data.ts")))) throw new Error("Merge the JSON-first reading-site PR before running the publisher");
@@ -237,7 +262,7 @@ export async function publish(config: Config, dependencies: Dependencies = {}): 
       log("No public snapshot changes; the existing revision's deployment was confirmed.");
     } else {
       if (diff.split("\n").some((file) => !file.startsWith("data/"))) throw new Error("Refusing to commit changes outside data/");
-      await git(["commit", "-m", "Publish scholarly article data"]);
+      await git(["commit", "-m", snapshotCommitSubject]);
       const revision = await git(["rev-parse", "HEAD"]);
       await git(["push", "origin", "HEAD:main"]);
       log(`Pushed ${revision}; waiting for the matching Pages deploy job.`);

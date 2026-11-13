@@ -194,7 +194,11 @@ source identities and keeps the old article IDs as `canonical_id` aliases. Deplo
 alias-aware schema, validation, and rendering before publishing data from this collector.
 Do not clear the archive to resolve an identity collision; its retained IDs preserve old URLs.
 
-Dirty checkouts and unpushed commits are never reset automatically. Failed promotion retains
+Dirty checkouts are never reset automatically. The one exception for unpushed commits is a
+data snapshot stranded by a failed push (for example a transient GitHub error): if every
+unpushed commit is a publisher `Publish scholarly article data` commit touching only `data/`,
+the next run discards it, logs the dropped revisions, and exports a fresh snapshot. Any other
+unpushed commit still stops the run for inspection. Failed promotion retains
 previous data in that attempt's `previous-data` directory. Inspect the checkout or failed
 GitHub workflow before retrying. Recovery Git commands can run in the publisher image through
 a temporary DSM task; SSH need not be enabled.
