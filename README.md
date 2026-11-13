@@ -286,8 +286,11 @@ A bounded single-page feed can still run without a key. Larger feeds may fail wi
 when following the first cursor; the full-config local migration rehearsal encountered
 exactly this requirement. Provide the key through a private environment or uncommitted
 Compose `.env`, not a PR, image build argument, public repository, or chat message.
-OpenAlex work pages use the documented 100-result maximum. Rate/budget errors remain
-explicit rather than silently truncating output or retrying indefinitely.
+OpenAlex work pages use the documented 100-result maximum. Temporary OpenAlex and bioRxiv
+outages (HTTP 502/503/504, timeouts, refused connections) are retried twice on the same page,
+15 s and then 30 s apart. bioRxiv requests get a 120 s timeout instead of the usual 30 s
+because single bioRxiv pages have taken about 30 s to answer. Rate/budget and authorization errors remain explicit rather than
+silently truncating output or retrying indefinitely.
 
 ```toml
 default_feed = "myfield"           # served at bare "/"

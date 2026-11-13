@@ -138,3 +138,78 @@ fn deserializes_official_response_field_names() {
 
     assert_eq!(response.collection[0].abstract_text, "An abstract.");
 }
+
+fn spawn_http_server(responses: Vec<String>) -> (String, std::thread::JoinHandle<usize>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = format!("http://{}", listener.local_addr().unwrap());
+    let handle = std::thread::spawn(move || {
+        for response in &responses {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            stream.write_all(response.as_bytes()).unwrap();
+        }
+        responses.len()
+    });
+    (address, handle)
+}
+
+fn http_response(status: &str, body: &str) -> String {
+    format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+const EMPTY_PAGE: &str = r#"{"messages":[{"total":"0"}],"collection":[]}"#;
+
+#[tokio::test]
+async fn retries_temporary_server_errors_on_the_same_page() {
+    let (api_base, server) = spawn_http_server(vec![
+        http_response("504 Gateway Timeout", "{}"),
+        http_response("503 Service Unavailable", "{}"),
+        http_response("200 OK", EMPTY_PAGE),
+    ]);
+    let response = fetch_page_from(
+        &reqwest::Client::new(), &api_base, "bioinformatics", "2026-11-11", "2026-11-13", 0,
+    ).await.unwrap();
+    assert!(response.collection.is_empty());
+    assert_eq!(server.join().unwrap(), 3);
+}
+
+#[tokio::test]
+async fn persistent_server_errors_exhaust_retries() {
+    let (api_base, server) = spawn_http_server(vec![http_response("502 Bad Gateway", "{}"); 3]);
+    let error = fetch_page_from(
+        &reqwest::Client::new(), &api_base, "bioinformatics", "2026-11-11", "2026-11-13", 0,
+    ).await.err().unwrap();
+    assert!(error.contains("502") && error.contains("exhausted 3 attempts"), "{error}");
+    assert_eq!(server.join().unwrap(), 3);
+}
+
+#[tokio::test]
+async fn other_http_errors_and_bad_json_fail_without_retrying() {
+    for response in [http_response("404 Not Found", "{}"), http_response("200 OK", "not json")] {
+        let (api_base, server) = spawn_http_server(vec![response]);
+        let error = fetch_page_from(
+            &reqwest::Client::new(), &api_base, "bioinformatics", "2026-11-11", "2026-11-13", 0,
+        ).await.err().unwrap();
+        assert!(!error.contains("exhausted"), "{error}");
+        assert_eq!(server.join().unwrap(), 1);
+    }
+}
+
+#[tokio::test]
+async fn refused_connections_are_retried_then_reported() {
+    let unused_port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let error = fetch_page_from(
+        &reqwest::Client::new(), &format!("http://127.0.0.1:{unused_port}"),
+        "bioinformatics", "2026-11-11", "2026-11-13", 0,
+    ).await.err().unwrap();
+    assert!(error.contains("exhausted 3 attempts"), "{error}");
+}
