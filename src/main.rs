@@ -1651,10 +1651,12 @@ async fn fetch_openalex_works_from(
     } else {
         format!(",topics.id:{}", request.topics.join("|"))
     };
+    // OpenAlex indexes each supplementary table, figure and data file deposited with a paper
+    // as its own work of type `supplementary-materials`; they are never wanted in a feed.
     let type_suffix = if request.relevance_filter == Some(RelevanceFilter::ProteinDesign) {
         ",type:article|preprint|review"
     } else {
-        ""
+        ",type:!supplementary-materials"
     };
     let from_suffix = format!(",from_publication_date:{}{type_suffix}", request.from);
 
@@ -3377,7 +3379,7 @@ optional = true
             let url = url::Url::parse(&format!("{api_base}{target}")).unwrap();
             let params = url.query_pairs().collect::<HashMap<_, _>>();
             assert!(params["filter"].contains("from_publication_date:2025-10-24"));
-            assert!(!params["filter"].contains("type:"));
+            assert!(params["filter"].contains(",type:!supplementary-materials"));
             if index == 0 {
                 assert!(params["filter"].contains("author.id:A1"));
                 assert!(!params.contains_key("search.title_and_abstract"));
